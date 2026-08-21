@@ -140,8 +140,12 @@ public class PlatformImage
 			if(image.getType() == BufferedImage.TYPE_INT_ARGB || image.getType() == BufferedImage.TYPE_INT_RGB) { canvas = image; }
 			else 
 			{
-				canvas = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_ARGB);
-				canvas.getGraphics().drawImage(image, 0, 0, null);
+				int w = image.getWidth();
+				int h = image.getHeight();
+				canvas = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+				int[] pixels = new int[w * h];
+				image.getRGB(0, 0, w, h, pixels, 0, w);
+				canvas.setRGB(0, 0, w, h, pixels, 0, w);
 			}
 
 			dataBuffer = ((DataBufferInt) canvas.getRaster().getDataBuffer()).getData();
@@ -161,8 +165,12 @@ public class PlatformImage
 		if(image.getType() == BufferedImage.TYPE_INT_ARGB || image.getType() == BufferedImage.TYPE_INT_RGB) { canvas = image; }
 		else 
 		{
-			canvas = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_ARGB);
-			canvas.getGraphics().drawImage(image, 0, 0, null);
+			int w = image.getWidth();
+			int h = image.getHeight();
+			canvas = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+			int[] pixels = new int[w * h];
+			image.getRGB(0, 0, w, h, pixels, 0, w);
+			canvas.setRGB(0, 0, w, h, pixels, 0, w);
 		}
 
 		dataBuffer = ((DataBufferInt) canvas.getRaster().getDataBuffer()).getData();
@@ -196,8 +204,12 @@ public class PlatformImage
 		if(image.getType() == BufferedImage.TYPE_INT_ARGB || image.getType() == BufferedImage.TYPE_INT_RGB) { canvas = image; }
 		else 
 		{
-			canvas = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_ARGB);
-			canvas.getGraphics().drawImage(image, 0, 0, null);
+			int w = image.getWidth();
+			int h = image.getHeight();
+			canvas = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+			int[] pixels = new int[w * h];
+			image.getRGB(0, 0, w, h, pixels, 0, w);
+			canvas.setRGB(0, 0, w, h, pixels, 0, w);
 		}
 
 		dataBuffer = ((DataBufferInt) canvas.getRaster().getDataBuffer()).getData();
