@@ -390,9 +390,10 @@ public class RecordStore
 		Mobile.log(Mobile.LOG_DEBUG, RecordStore.class.getPackage().getName() + "." + RecordStore.class.getSimpleName() + ": " + "> getRecord(" + recordId + ", " + buffer + ", " + offset + ")");
 		if (!recordStoreIsOpen) { throw new RecordStoreNotOpenException("Cannot get the record of a closed Record Store"); }
 		if(recordId <= 0 || !recordIds.contains(recordId)) { throw new InvalidRecordIDException("getRecord: Invalid Record ID: "+recordId); }
-		if(getRecord(recordIds.indexOf(recordId)).length > buffer.length-offset) { throw new ArrayIndexOutOfBoundsException("Record data won't fit on the provided buffer"); }
 
-		byte[] temp = getRecord(recordIds.indexOf(recordId));
+		byte[] temp = getRecord(recordId);
+		if(temp == null) { return 0; }
+		if(temp.length > buffer.length-offset) { throw new ArrayIndexOutOfBoundsException("Record data won't fit on the provided buffer"); }
 
 		System.arraycopy(temp, 0, buffer, offset, temp.length);
 
@@ -649,7 +650,7 @@ public class RecordStore
 			if(index < 0) { index = 0; }
 			if(index >= count) { throw(new InvalidRecordIDException("Next Record ID is out of bounds")); }
 			Mobile.log(Mobile.LOG_DEBUG, RecordStore.class.getPackage().getName() + "." + RecordStore.class.getSimpleName() + ": " + "> Enum Next Record " + index);
-			return records.get(elements[index++]).clone();
+			return records.get(recordIds.indexOf(elements[index++])).clone();
 		}
 
 		public int nextRecordId() throws InvalidRecordIDException, RecordStoreNotOpenException
@@ -676,7 +677,7 @@ public class RecordStore
 
 			Mobile.log(Mobile.LOG_DEBUG, RecordStore.class.getPackage().getName() + "." + RecordStore.class.getSimpleName() + ": " + "> Enum Previous Record " + (index-1));
 
-			return records.get(elements[--index]).clone();
+			return records.get(recordIds.indexOf(elements[--index])).clone();
 		}
 
 		public int previousRecordId() throws InvalidRecordIDException, RecordStoreNotOpenException
@@ -718,7 +719,7 @@ public class RecordStore
 				{
 					for (int j = 0; j < count - 1 - i; j++)
 					{
-						if (comparator.compare(records.get(elements[j]), records.get(elements[j + 1])) == RecordComparator.FOLLOWS)
+						if (comparator.compare(records.get(recordIds.indexOf(elements[j])), records.get(recordIds.indexOf(elements[j + 1]))) == RecordComparator.FOLLOWS)
 						{
 							int temp = elements[j];
 							elements[j] = elements[j + 1];
@@ -872,7 +873,7 @@ public class RecordStore
 					{
 						// String values
 
-						if(key.equals("lastModified"))  { lastModified = Integer.parseInt(value); } // lastModified date
+						if(key.equals("lastModified"))  { try { String v = value.substring(1, value.length()-1); lastModified = Long.parseLong(v); } catch (Exception e) { try { lastModified = Long.parseLong(value); } catch (Exception e2) {} } } // lastModified date
 						else if(key.equals("password")) { password = value.substring(1, value.length() - 1); } // Retrieve password without quotes
 						// If the json representation expands further, this might have more keys being matched
 					}
@@ -900,6 +901,7 @@ public class RecordStore
 						else if(key.equals("authentication")) { authmode = Integer.parseInt(value); }
 						else if(key.equals("modificationCount")) { version = Integer.parseInt(value); }
 						else if(key.equals("compatibleLastId")) { nextid = Integer.parseInt(value); }
+						else if(key.equals("lastModified")) { try { lastModified = Long.parseLong(value); } catch (Exception e) {} }
 					}
 				}
 			}
