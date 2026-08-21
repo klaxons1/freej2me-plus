@@ -82,9 +82,10 @@ public class Camera extends Node
 			 * This cache is re-set to null by `setParallel` and `setPerspective`.
 			 */
 			if (dirtyMatrix) { this.computeMatrix(); }
+
+			/* Copies the current projection matrix to the given transform. */
+			transform.set(this.projMatrix);
 		}
-		/* Copies the current projection matrix to the given transform, and returns the current projection mode. */
-		transform.set(this.projMatrix);
 		return this.projMode;
 	}
 

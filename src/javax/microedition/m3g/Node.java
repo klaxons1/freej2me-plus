@@ -257,14 +257,20 @@ public abstract class Node extends Transformable
 		int lcaIndexThis = i + 1;
 		int lcaIndexTarget = j + 1;
 
-		// We accumulate transforms from this node all the way to the
-		// lowest ancestor common to both nodes
+		/*
+		 * Accumulate the node transformation C = T*R*S*M (JSR-184) from this
+		 * node up to the lowest common ancestor. getTransform() only returns
+		 * the generic matrix M, so games that place the camera with
+		 * setTranslation / setOrientation (OpenSM3D, etc.) would otherwise
+		 * render from the identity pose: first frame looks plausible, then
+		 * the view never updates and a room change draws a black world.
+		 */
 		Transform thisToRoot = new Transform();
 		Transform temp = new Transform();
 		for (int k = lcaIndexThis - 1; k >= 0; k--)
 		{
 			Node n = (Node) pathThis.elementAt(k);
-			n.getTransform(temp);
+			n.getCompositeTransform(temp);
 			thisToRoot.postMultiply(temp);
 		}
 
@@ -273,7 +279,7 @@ public abstract class Node extends Transformable
 		for (int k = lcaIndexTarget - 1; k >= 0; k--)
 		{
 			Node n = (Node) pathTarget.elementAt(k);
-			n.getTransform(temp);
+			n.getCompositeTransform(temp);
 			targetToRoot.postMultiply(temp);
 		}
 

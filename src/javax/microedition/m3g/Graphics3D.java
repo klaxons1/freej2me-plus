@@ -507,12 +507,15 @@ public class Graphics3D
 
 		final CompositingMode compositingMode = appearance.getCompositingMode() != null ? appearance.getCompositingMode() : this.defaultCompositing;
 
-		final int shadingMode = appearance.getPolygonMode() != null ? appearance.getPolygonMode().getShading() : PolygonMode.SHADE_SMOOTH;
+		/* JSR-184: a null PolygonMode means the default values are used. */
+		final PolygonMode polygonMode = appearance.getPolygonMode();
+		final int shadingMode = polygonMode != null ? polygonMode.getShading() : PolygonMode.SHADE_SMOOTH;
 		final Material material = appearance.getMaterial();
-		final int cullingMode = appearance.getPolygonMode() != null ? appearance.getPolygonMode().getCulling() : PolygonMode.CULL_BACK;
-		final int windingOrder = appearance.getPolygonMode() != null ? appearance.getPolygonMode().getWinding() : PolygonMode.WINDING_CCW;
+		final int cullingMode = polygonMode != null ? polygonMode.getCulling() : PolygonMode.CULL_BACK;
+		final int windingOrder = polygonMode != null ? polygonMode.getWinding() : PolygonMode.WINDING_CCW;
+		final boolean twoSidedLighting = polygonMode != null && polygonMode.isTwoSidedLightingEnabled();
 
-		perspectiveCorrection = appearance.getPolygonMode() != null ? appearance.getPolygonMode().isPerspectiveCorrectionEnabled() : false;
+		perspectiveCorrection = polygonMode != null && polygonMode.isPerspectiveCorrectionEnabled();
 		perspectiveCorrection = perspectiveCorrection && (projType == Camera.PERSPECTIVE);
 
 		ord[0] = 0; ord[1] = 1; ord[2] = 2;
@@ -692,7 +695,7 @@ public class Graphics3D
 			// Position and texture vertex data
 			vertClip, texVerts,
 			// Material and shading
-			material, shadingMode, appearance.getPolygonMode().isTwoSidedLightingEnabled(),
+			material, shadingMode, twoSidedLighting,
 			// Normal data
 			eyePos, vertNorms, normalMatrix,
 			// Lights
