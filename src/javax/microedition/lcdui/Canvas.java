@@ -204,8 +204,7 @@ public abstract class Canvas extends Displayable
 
 	public void repaint(final int x, final int y, final int width, final int height)
 	{
-		// Also check if repaints are being serviced here, some jars like Garfield's House add repaint calls in a separate thread from that blocked by serviceRepaints
-		if (!isShown() || listCommands || servicing) { return; }
+		if (!isShown() || listCommands || (servicing && Mobile.compatImmediateRepaints)) { return; }
 
 		if(!Mobile.compatImmediateRepaints) 
 		{
@@ -266,28 +265,33 @@ public abstract class Canvas extends Displayable
 		Mobile.getPlatform().flushGraphics(platformImage, x, y, width, height); 
 	}
 
-	public void serviceRepaints() 
+	public void serviceRepaints()
 	{
 		if(!isShown() || !pendingRepaint.get()) { return; }
-	
-		servicing = true;
-		if(!MobilePlatform.pressedKeys[20]) // If the fast-forward key is pressed, ignore the waiting and force a repaint immediately
-		{
-			// serviceRepaints has to force pending repaints to happen, so initially wait until they have time to be serviced normally, or multiple retries were attempted and unsuccessful
-			for(byte waitTime = 0; waitTime < 16; waitTime++) 
-			{
-				if(pendingRepaint.get()) 
-				{
-					try { Thread.sleep(1); } // Worst case scenario, this will sleep for a total of 16ms before serviceRepaints forces repaints to happen (60fps min force-refresh)
-					catch (Exception e) { }
-				}
-				else { break; } // Good, the pending repaint was serviced, break out of the loop
-			}
-		}
 
-		// If Repaints weren't serviced in a timely manner above, the alternative is to force them to happen
-		Mobile.getDisplay().processPaintsNow(); 
-		servicing = false;
+		if(servicing) { return; }
+
+		servicing = true;
+		try
+		{
+			if(!MobilePlatform.pressedKeys[20]) // If the fast-forward key is pressed, ignore the waiting and force a repaint immediately
+			{
+				// serviceRepaints has to force pending repaints to happen, so initially wait until they have time to be serviced normally, or multiple retries were attempted and unsuccessful
+				for(byte waitTime = 0; waitTime < 16; waitTime++)
+				{
+					if(pendingRepaint.get())
+					{
+						try { Thread.sleep(1); } // Worst case scenario, this will sleep for a total of 16ms before serviceRepaints forces repaints to happen (60fps min force-refresh)
+						catch (Exception e) { }
+					}
+					else { break; } // Good, the pending repaint was serviced, break out of the loop
+				}
+			}
+
+			// If Repaints weren't serviced in a timely manner above, the alternative is to force them to happen
+			Mobile.getDisplay().processPaintsNow();
+		}
+		finally { servicing = false; }
 	}
 
 	public void setFullScreenMode(boolean mode)
