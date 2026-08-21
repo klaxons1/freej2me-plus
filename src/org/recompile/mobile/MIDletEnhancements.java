@@ -82,4 +82,64 @@ public class MIDletEnhancements
 
     /* Can reduce cpu usage in some games, and even helps fix others like Super Action Hero (pulled from J2ME-Loader) */
     public static void yieldOverride() throws InterruptedException { Thread.sleep(1); }
+
+    public static int readFully(java.io.InputStream is, byte[] b) throws java.io.IOException
+    {
+        int offset = 0;
+        int remaining = b.length;
+        while (remaining > 0)
+        {
+            int read = is.read(b, offset, remaining);
+            if (read == -1) { break; }
+            offset += read;
+            remaining -= read;
+        }
+        return offset == 0 ? -1 : offset;
+    }
+
+    public static int readFully(java.io.InputStream is, byte[] b, int off, int len) throws java.io.IOException
+    {
+        int offset = off;
+        int remaining = len;
+        int total = 0;
+        while (remaining > 0)
+        {
+            int read = is.read(b, offset, remaining);
+            if (read == -1) { break; }
+            offset += read;
+            remaining -= read;
+            total += read;
+        }
+        return total == 0 ? -1 : total;
+    }
+
+    public static int readFully(java.io.DataInputStream dis, byte[] b) throws java.io.IOException
+    {
+        int offset = 0;
+        int remaining = b.length;
+        while (remaining > 0)
+        {
+            int read = dis.read(b, offset, remaining);
+            if (read == -1) { break; }
+            offset += read;
+            remaining -= read;
+        }
+        return offset == 0 ? -1 : offset;
+    }
+
+    public static int readFully(java.io.DataInputStream dis, byte[] b, int off, int len) throws java.io.IOException
+    {
+        int offset = off;
+        int remaining = len;
+        int total = 0;
+        while (remaining > 0)
+        {
+            int read = dis.read(b, offset, remaining);
+            if (read == -1) { break; }
+            offset += read;
+            remaining -= read;
+            total += read;
+        }
+        return total == 0 ? -1 : total;
+    }
 }

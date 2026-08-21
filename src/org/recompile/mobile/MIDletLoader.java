@@ -999,14 +999,12 @@ public class MIDletLoader extends URLClassLoader
 
 		public int read()
 		{
-			int t = iostream.read();
-			if (t == -1) { return 0; }
-			return t;
+			return iostream.read();
 		}
 		public int read(byte[] b, int off, int len)
 		{
 			int t = iostream.read(b, off, len);
-			if (t == -1) { return 0; }
+			if (t == -1) { return -1; }
 			return t;
 		}
 	}
@@ -1133,6 +1131,28 @@ public class MIDletLoader extends URLClassLoader
 				else if (opcode == INVOKEVIRTUAL && name.equals("getResourceAsStream") && owner.equals("java/lang/Class"))
 				{
 					mv.visitMethodInsn(INVOKESTATIC, "org/recompile/mobile/Mobile", name, "(Ljava/lang/Class;Ljava/lang/String;)Ljava/io/InputStream;");
+				}
+				else if (opcode == INVOKEVIRTUAL && name.equals("read") && desc.equals("([B)I"))
+				{
+					if (owner.equals("java/io/DataInputStream"))
+					{
+						mv.visitMethodInsn(INVOKESTATIC, "org/recompile/mobile/MIDletEnhancements", "readFully", "(Ljava/io/DataInputStream;[B)I");
+					}
+					else
+					{
+						mv.visitMethodInsn(INVOKESTATIC, "org/recompile/mobile/MIDletEnhancements", "readFully", "(Ljava/io/InputStream;[B)I");
+					}
+				}
+				else if (opcode == INVOKEVIRTUAL && name.equals("read") && desc.equals("([BII)I"))
+				{
+					if (owner.equals("java/io/DataInputStream"))
+					{
+						mv.visitMethodInsn(INVOKESTATIC, "org/recompile/mobile/MIDletEnhancements", "readFully", "(Ljava/io/DataInputStream;[BII)I");
+					}
+					else
+					{
+						mv.visitMethodInsn(INVOKESTATIC, "org/recompile/mobile/MIDletEnhancements", "readFully", "(Ljava/io/InputStream;[BII)I");
+					}
 				}
 				else
 				{
