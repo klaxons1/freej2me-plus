@@ -676,8 +676,20 @@ public class Graphics3D
 		{
 			// Normals transform by the inverse transpose of the model-view matrix.
 			normalMatrix.set(tr);
-			normalMatrix.invert();
-			normalMatrix.transpose();
+			try
+			{
+				normalMatrix.invert();
+				normalMatrix.transpose();
+			}
+			catch (ArithmeticException singularModelView)
+			{
+				/*
+				 * JSR-184 states that lighting is undefined for a non-invertible
+				 * local-to-camera transform; render() does not specify an exception.
+				 * Identity provides deterministic undefined normals without aborting.
+				 */
+				normalMatrix.setIdentity();
+			}
 
 			posLocalToEye.set(tr);
 			posLocalToEye.postTranslate(scaleBias[1], scaleBias[2], scaleBias[3]);
