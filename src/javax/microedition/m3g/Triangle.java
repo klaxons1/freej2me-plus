@@ -73,8 +73,8 @@ class Triangle
 		float[] eyePos, VertexArray vertNorms, Transform normalMatrix,
 		// Lights
 		ArrayList<Light> lights, float[] lightEyePos, float[] lightEyeDir,
-		// IndexArray, clipping, winding order and perspectiveCorrection
-		int[] tris, int[] renderableTriangles, int cullingMode, VertexBuffer vertices,
+		// IndexArray, clipping, scope, winding order and perspectiveCorrection
+		int[] tris, int[] renderableTriangles, int cullingMode, VertexBuffer vertices, int scope,
 		boolean polygonClockwise, boolean perspectiveCorrect)
 	{
 		renderableTriangles[0] = 0;
@@ -143,13 +143,19 @@ class Triangle
 				inC[2] = vertices.getDefaultColor();
 			}
 
-			// Is the app using lights? Then calculate per-vertex lighting.
-			boolean hasLighting = (vertNorms != null && material != null &&
-				lights != null && !lights.isEmpty());
+			/*
+			 * A non-null Material enables lighting even when no light matches; emission
+			 * must still remain visible. Missing normals make lighting undefined, so keep
+			 * the existing deterministic unlit fallback for that invalid input.
+			 */
+			boolean hasLighting = vertNorms != null && material != null;
 			if (hasLighting)
 			{
-				calculateLighting(eyePos, vertNorms, normalMatrix, material, shadingMode, twoSide,
-					localCameraLight, lights, lightEyePos, lightEyeDir, tris, tri_id, Triangle.inC);
+				final boolean ccw = isCounterClockwise(Triangle.inV);
+				final boolean isFrontFace = polygonClockwise ? !ccw : ccw;
+				calculateLighting(eyePos, vertNorms, normalMatrix, material, shadingMode,
+					twoSide && !isFrontFace, localCameraLight, lights, lightEyePos, lightEyeDir,
+					scope, tris, tri_id, Triangle.inC);
 			}
 
 			/*
@@ -190,10 +196,42 @@ class Triangle
 		return Triangle.result;
 	}
 
+	private static final float length3(float x, float y, float z)
+	{
+		return (float) Math.sqrt(x * x + y * y + z * z);
+	}
+
+	private static final void normalize3(float[] vector)
+	{
+		final float length = length3(vector[0], vector[1], vector[2]);
+		if (length > M3GMath.EPSILON)
+		{
+			vector[0] /= length;
+			vector[1] /= length;
+			vector[2] /= length;
+		}
+		else
+		{
+			vector[0] = 0.0f;
+			vector[1] = 0.0f;
+			vector[2] = 1.0f;
+		}
+	}
+
+	/* Signed projected area without performing perspective division. */
+	private static final boolean isCounterClockwise(float[] coords)
+	{
+		final float ax = coords[0], ay = coords[1], aw = coords[3];
+		final float bx = coords[4], by = coords[5], bw = coords[7];
+		final float cx = coords[8], cy = coords[9], cw = coords[11];
+		return ((bx * aw - ax * bw) * (cy * aw - ay * cw) -
+			(by * aw - ay * bw) * (cx * aw - ax * cw)) > 0.0f;
+	}
+
 	private static final void calculateLighting(
 		float[] eyePos, VertexArray vertNorms, Transform normalMatrix,
-		Material material, int shadingMode, boolean twoSided, boolean localCameraLight,
-		ArrayList<Light> lights, float[] lightEyePos, float[] lightEyeDir,
+		Material material, int shadingMode, boolean reverseNormals, boolean localCameraLight,
+		ArrayList<Light> lights, float[] lightEyePos, float[] lightEyeDir, int scope,
 		int[] tris, int tri_id, int[] outColors)
 	{
 		// Material Colors
@@ -235,30 +273,40 @@ class Triangle
 				maR = vR; maG = vG; maB = vB;
 			}
 
-			// Normals may be stored as either short or byte
+			/*
+			 * Normal components map linearly from the complete signed integer range
+			 * to [-1, 1]: (2*n + 1)/(2^bits - 1). In particular, zero is not exactly
+			 * representable, as required by VertexBuffer.setNormals.
+			 */
 			if (vertNorms.getComponentType() == 1)
 			{
 				vertNorms.get(vertIndex, 1, B_NORM);
-				N_EYE[0] = B_NORM[0] / 127.0f;
-				N_EYE[1] = B_NORM[1] / 127.0f;
-				N_EYE[2] = B_NORM[2] / 127.0f;
+				N_EYE[0] = (2 * B_NORM[0] + 1) / 255.0f;
+				N_EYE[1] = (2 * B_NORM[1] + 1) / 255.0f;
+				N_EYE[2] = (2 * B_NORM[2] + 1) / 255.0f;
 			}
 			else
 			{
 				vertNorms.get(vertIndex, 1, S_NORM);
-				N_EYE[0] = S_NORM[0] / 32767.0f;
-				N_EYE[1] = S_NORM[1] / 32767.0f;
-				N_EYE[2] = S_NORM[2] / 32767.0f;
+				N_EYE[0] = (2 * S_NORM[0] + 1) / 65535.0f;
+				N_EYE[1] = (2 * S_NORM[1] + 1) / 65535.0f;
+				N_EYE[2] = (2 * S_NORM[2] + 1) / 65535.0f;
 			}
 
-			// Vertex normals must now be multiplied by the normal matrix to
-			// reach eye space.
-			float nx = N_EYE[0], ny = N_EYE[1], nz = N_EYE[2];
+			// Transform the normal to eye space and normalize it before lighting.
+			final float nx = N_EYE[0], ny = N_EYE[1], nz = N_EYE[2];
 			N_EYE[0] = L_MAT[0] * nx + L_MAT[1] * ny + L_MAT[2] * nz;
 			N_EYE[1] = L_MAT[4] * nx + L_MAT[5] * ny + L_MAT[6] * nz;
 			N_EYE[2] = L_MAT[8] * nx + L_MAT[9] * ny + L_MAT[10] * nz;
+			normalize3(N_EYE);
 
-			M3GMath.normalize(N_EYE);
+			// In two-sided mode only back-facing polygons use the reversed normal.
+			if (reverseNormals)
+			{
+				N_EYE[0] = -N_EYE[0];
+				N_EYE[1] = -N_EYE[1];
+				N_EYE[2] = -N_EYE[2];
+			}
 
 			V_EYE[0] = eyePos[vertIndex * 4];
 			V_EYE[1] = eyePos[vertIndex * 4 + 1];
@@ -274,7 +322,7 @@ class Triangle
 				viewX = -V_EYE[0];
 				viewY = -V_EYE[1];
 				viewZ = -V_EYE[2];
-				float viewLen = M3GMath.sqrt(viewX * viewX + viewY * viewY + viewZ * viewZ);
+				float viewLen = length3(viewX, viewY, viewZ);
 				if (viewLen > M3GMath.EPSILON) { viewX /= viewLen; viewY /= viewLen; viewZ /= viewLen; }
 			}
 			else
@@ -284,9 +332,15 @@ class Triangle
 				viewZ = 1.0f;
 			}
 
-			for (int l = 0; l < lights.size(); l++)
+			int activeLights = 0;
+			for (int l = 0; lights != null && l < lights.size(); l++)
 			{
 				Light light = lights.get(l);
+				if (light == null || !light.isRenderingEnabled() || (scope & light.getScope()) == 0)
+					{ continue; }
+				if (activeLights >= Graphics3D.MAX_LIGHTS) { break; }
+				activeLights++;
+
 				int lMode = light.getMode();
 				float lIntensity = light.getIntensity();
 
@@ -315,7 +369,7 @@ class Triangle
 					lightDirY = -lightEyeDir[l * 4 + 1];
 					lightDirZ = -lightEyeDir[l * 4 + 2];
 
-					float lLen = M3GMath.sqrt(lightDirX * lightDirX + lightDirY * lightDirY + lightDirZ * lightDirZ);
+					float lLen = length3(lightDirX, lightDirY, lightDirZ);
 					if (lLen > M3GMath.EPSILON) { lightDirX /= lLen; lightDirY /= lLen; lightDirZ /= lLen; }
 				}
 				else
@@ -324,12 +378,12 @@ class Triangle
 					float lx = lightEyePos[l * 4] - V_EYE[0];
 					float ly = lightEyePos[l * 4 + 1] - V_EYE[1];
 					float lz = lightEyePos[l * 4 + 2] - V_EYE[2];
-					float dist = M3GMath.sqrt(lx * lx + ly * ly + lz * lz);
+					float dist = length3(lx, ly, lz);
 
 					if (dist > M3GMath.EPSILON) { lightDirX = lx / dist; lightDirY = ly / dist; lightDirZ = lz / dist; }
 					else { lightDirX = 0; lightDirY = 0; lightDirZ = 1; }
 
-					attenuation = M3GMath.fastReciprocal(light.getConstantAttenuation() +
+					attenuation = 1.0f / (light.getConstantAttenuation() +
 						light.getLinearAttenuation() * dist +
 						light.getQuadraticAttenuation() * dist * dist);
 
@@ -339,9 +393,15 @@ class Triangle
 						float sdX = lightEyeDir[l * 4];
 						float sdY = lightEyeDir[l * 4 + 1];
 						float sdZ = lightEyeDir[l * 4 + 2];
+						final float sdLen = length3(sdX, sdY, sdZ);
+						if (sdLen > M3GMath.EPSILON) { sdX /= sdLen; sdY /= sdLen; sdZ /= sdLen; }
 
-						float spotDot = (lightDirX * sdX + lightDirY * sdY + lightDirZ * sdZ);
-						float cutoffCos = M3GMath.cos(M3GMath.toRadians(light.getSpotAngle()));
+						// lightDir points vertex -> light; the cone test needs light -> vertex.
+						float spotDot = M3GMath.min(1.0f,
+							-(lightDirX * sdX + lightDirY * sdY + lightDirZ * sdZ));
+						final float spotAngle = light.getSpotAngle();
+						final float cutoffCos = (spotAngle == 90.0f) ? 0.0f :
+							(float) Math.cos(Math.toRadians(spotAngle));
 
 						if (spotDot >= cutoffCos)
 						{
@@ -354,14 +414,8 @@ class Triangle
 				if (attenuation <= 0.0f) { continue; }
 
 				// Calculate Dot Product between the normal and light (N . L)
-				float nDotL = N_EYE[0] * lightDirX + N_EYE[1] * lightDirY + N_EYE[2] * lightDirZ;
-
-				// Handle Two-Sided Materials by flipping normals. TODO: UNTESTED!
-				if (twoSided && nDotL < 0.0f)
-				{
-					nDotL = -nDotL;
-					nx = -nx; ny = -ny; nz = -nz;
-				}
+				float nDotL = M3GMath.min(1.0f,
+					N_EYE[0] * lightDirX + N_EYE[1] * lightDirY + N_EYE[2] * lightDirZ);
 
 				if (nDotL > 0.0f)
 				{
@@ -373,13 +427,13 @@ class Triangle
 
 					// Specular lighting (Gouraud, since we do it per-vertex)
 					float hX = lightDirX + viewX, hY = lightDirY + viewY, hZ = lightDirZ + viewZ;
-					float hLen = M3GMath.sqrt(hX * hX + hY * hY + hZ * hZ);
+					float hLen = length3(hX, hY, hZ);
 
 					if (hLen > M3GMath.EPSILON)
 					{
 						hX /= hLen; hY /= hLen; hZ /= hLen;
-						float nDotH = N_EYE[0] * hX + N_EYE[1] * hY + N_EYE[2] * hZ;
-						if (twoSided && nDotH < 0.0f) { nDotH = -nDotH; }
+						float nDotH = M3GMath.min(1.0f,
+							N_EYE[0] * hX + N_EYE[1] * hY + N_EYE[2] * hZ);
 
 						if (nDotH > 0.0f)
 						{
@@ -392,10 +446,10 @@ class Triangle
 				}
 			}
 
-			// We now have the final color for the vertex
-			int ir = (int) (M3GMath.min(1.0f, r) * 255.0f);
-			int ig = (int) (M3GMath.min(1.0f, g) * 255.0f);
-			int ib = (int) (M3GMath.min(1.0f, b) * 255.0f);
+			// Negative-intensity lights are valid; clamp their final result to [0, 1].
+			int ir = (int) (M3GMath.max(0.0f, M3GMath.min(1.0f, r)) * 255.0f);
+			int ig = (int) (M3GMath.max(0.0f, M3GMath.min(1.0f, g)) * 255.0f);
+			int ib = (int) (M3GMath.max(0.0f, M3GMath.min(1.0f, b)) * 255.0f);
 			int color = (alpha << 24) | (ir << 16) | (ig << 8) | ib;
 
 			outColors[v] = color;
@@ -544,14 +598,7 @@ class Triangle
 
 	public final boolean isCounterClockwise()
 	{
-		float ax = v[0], ay = v[1], aw = v[3];
-		float bx = v[4], by = v[5], bw = v[7];
-		float cx = v[8], cy = v[9], cw = v[11];
-
-		// Usually counterClockWise would be <= 0.0, but we're in Clip space
-		// here where Y is the inverse of NDC, so invert to > 0.0;
-		return ((bx * aw - ax * bw) * (cy * aw - ay * cw) -
-			(by * aw - ay * bw) * (cx * aw - ax * cw)) > 0.0f;
+		return isCounterClockwise(this.v);
 	}
 
 	public final float xA() { return v[4 * 0 + 0]; }

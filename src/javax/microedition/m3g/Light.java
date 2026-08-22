@@ -32,7 +32,7 @@ public class Light extends Node
 	private float constant = 1.0f;
 	private float linear = 0.0f;
 	private float quadratic = 0.0f;
-	private float angle = 180.0f;
+	private float angle = 45.0f;
 	private float exponent = 0.0f;
 
 	public Light() { }
@@ -83,23 +83,23 @@ public class Light extends Node
 
 	public void setMode(int value)
 	{
-		if (mode < AMBIENT || mode > SPOT)
-			{ throw new IllegalArgumentException("Invalid light mode: " + mode); }
+		if (value < AMBIENT || value > SPOT)
+			{ throw new IllegalArgumentException("Invalid light mode: " + value); }
 
 		this.mode = value;
 	}
 
 	public void setSpotAngle(float theta)
 	{
-		if ((theta < 0.0f || theta > 90.0f) && theta != 180.0f)
-			{ throw new IllegalArgumentException("Spot angle must be either in range of [0, 90], or equal to 180."); }
+		if (!(theta >= 0.0f && theta <= 90.0f))
+			{ throw new IllegalArgumentException("Spot angle must be in range [0, 90]."); }
 
 		this.angle = theta;
 	}
 
 	public void setSpotExponent(float exp)
 	{
-		if (exp < 0.0f || exp > 128.0f)
+		if (!(exp >= 0.0f && exp <= 128.0f))
 			{ throw new IllegalArgumentException("Spot exponent must be in range of [0, 128]."); }
 
 		this.exponent = exp;

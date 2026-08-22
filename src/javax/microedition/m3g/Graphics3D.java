@@ -200,14 +200,11 @@ public class Graphics3D
 		/* As per JSR-184, addLight() must throw a NullPointerException if no light is given */
 		if (light == null) { throw new NullPointerException("addLight() was called but no light object was provided."); }
 
-		// Are we going over the maximum allowed lights? Clear the light at
-		// the first position to make room for the new one
-		if (this.currLights.size() == MAX_LIGHTS)
-		{
-			this.currLights.remove(0);
-			this.currLightTrans.remove(0);
-		}
-
+		/*
+		 * The current-light array itself is not limited to MAX_LIGHTS. That property
+		 * only limits how many matching lights may contribute to one submesh; indices
+		 * returned here must remain strictly increasing until the array is reset.
+		 */
 		this.currLights.add(light);
 		this.currLightTrans.add(transform == null ? new Transform() : new Transform(transform));
 		return this.currLights.size() - 1;
@@ -426,7 +423,7 @@ public class Graphics3D
 	public Light getLight(int index, Transform transform)
 	{
 		/* As per JSR-184, throw IndexOutOfBoundsException if the requested light index is out of bounds. */
-		if (index < 0 || index > this.currLights.size()) { throw new IndexOutOfBoundsException("The received light index is out of bounds."); }
+		if (index < 0 || index >= this.currLights.size()) { throw new IndexOutOfBoundsException("The received light index is out of bounds."); }
 
 		/* If a transform variable is received, use it to store the requested light's transform. */
 		if (transform != null) { transform.set(this.currLightTrans.get(index)); }
@@ -663,16 +660,17 @@ public class Graphics3D
 
 		tr.setIdentity();
 
-		// Transform mesh from local space to world space
-		// Receiving a null "transform" indicates that the identity matrix must
-		// be used, which just means we don't need to postMultiply.
-		if (transform != null) { tr.postMultiply(transform); }
-
-		// Apply the inverse of the camera's transform to the mesh (Eye/View Space)
+		/*
+		 * Model-to-eye is camera^-1 * model for column vectors. The old order was
+		 * model * camera^-1, which made normals, point lights and local-viewer
+		 * specular lighting move incorrectly whenever the camera was transformed.
+		 */
 		if (this.currCamTransInv != null) { tr.postMultiply(this.currCamTransInv); }
+		if (transform != null) { tr.postMultiply(transform); }
 
 		if (vertNorms != null && material != null)
 		{
+			// Normals transform by the inverse transpose of the model-view matrix.
 			normalMatrix.set(tr);
 			normalMatrix.invert();
 			normalMatrix.transpose();
@@ -698,13 +696,12 @@ public class Graphics3D
 
 		for (int i = 0; i < numLights; i++)
 		{
-			Light light = this.currLights.get(i);
 			Transform lightTrans = this.currLightTrans.get(i);
 
-			// Compute Light World-to-Eye Transform
+			// Light-to-eye is camera^-1 * light-to-world for column vectors.
 			tr.setIdentity();
-			if (lightTrans != null) { tr.postMultiply(lightTrans); }
 			if (this.currCamTransInv != null) { tr.postMultiply(this.currCamTransInv); }
+			if (lightTrans != null) { tr.postMultiply(lightTrans); }
 
 			// Light Position in Eye Space
 			lightVec[0] = 0.0f;
@@ -766,8 +763,8 @@ public class Graphics3D
 			eyePos, vertNorms, normalMatrix,
 			// Lights
 			this.currLights, lightEyePos, lightEyeDir,
-			// IndexArray, clipping, winding order and perspectiveCorrection
-			triangles.getIndexArray(), renderableTriangles, cullingMode, vertices,
+			// IndexArray, clipping, scope, winding order and perspectiveCorrection
+			triangles.getIndexArray(), renderableTriangles, cullingMode, vertices, scope,
 			windingOrder == PolygonMode.WINDING_CW, perspectiveCorrection);
 
 		// At this point the triangles in `trisScreen` are actually
@@ -985,12 +982,15 @@ public class Graphics3D
 
 	private void positionLights(World world, Group group)
 	{
+		// Rendering enable is inherited, so a disabled group disables its lights too.
+		if (!group.isRenderingEnabled()) { return; }
+
 		for (int i = 0; i < group.getChildCount(); ++i)
 		{
 			Transform t = new Transform();
 			Node node = group.getChild(i);
 
-			if (node instanceof Light && node.getTransformTo(world, t))
+			if (node instanceof Light && node.isRenderingEnabled() && node.getTransformTo(world, t))
 				{ addLight((Light) node, t); }
 			else if (node instanceof Group)
 				{ positionLights(world, (Group) node);}
@@ -1035,8 +1035,8 @@ public class Graphics3D
 
 	public void setLight(int index, Light light, Transform transform)
 	{
-		/* As per JSR-184, throw IndexOutOfBoundsException if index < 0 or index > CurrentAmountOfLights. */
-		if (index < 0 || index >= MAX_LIGHTS) { throw new IndexOutOfBoundsException("Tried to modify a Light on an out-of-bounds index."); }
+		/* As per JSR-184, setLight only replaces an existing array slot. */
+		if (index < 0 || index >= this.currLights.size()) { throw new IndexOutOfBoundsException("Tried to modify a Light on an out-of-bounds index."); }
 
 		/* If no transform is received, use the identity matrix. */
 		if (transform == null) { transform = new Transform(); }
@@ -1045,7 +1045,7 @@ public class Graphics3D
 		// so we're simply updating the arrays at the index,
 		// even if any new value is null.
 		this.currLights.set(index, light);
-		this.currLightTrans.set(index, transform);
+		this.currLightTrans.set(index, new Transform(transform));
 	}
 
 	public void setViewport(int x, int y, int width, int height)
