@@ -157,6 +157,7 @@ public class Graphics3D
 	final float[] coY = new float[3];
 	final float[] coZ = new float[3];
 	final float[] coW = new float[3];
+	final float[] coFog = new float[3];
 	final float[] projParams = new float[4];
 	float xTop, yTop, zTop;
 	float xMidL, yMid, zMidL;
@@ -166,6 +167,7 @@ public class Graphics3D
 
 	float rStepX = 0, gStepX = 0, bStepX = 0, aStepX = 0;
 	float rStepY = 0, gStepY = 0, bStepY = 0, aStepY = 0;
+	float fogStepX = 0, fogStepY = 0;
 	float deltaR = 0, deltaG = 0, deltaB = 0, deltaA = 0;
 
 	final float[] scaleBias = new float[4];
@@ -693,7 +695,8 @@ public class Graphics3D
 		if (this.currCamTransInv != null) { tr.postMultiply(this.currCamTransInv); }
 		if (transform != null) { tr.postMultiply(transform); }
 
-		if (vertNorms != null && material != null)
+		final boolean needsLighting = vertNorms != null && material != null;
+		if (needsLighting)
 		{
 			// Normals transform by the inverse transpose of the model-view matrix.
 			normalMatrix.set(tr);
@@ -712,6 +715,12 @@ public class Graphics3D
 				normalMatrix.setIdentity();
 			}
 
+		}
+
+		if (needsLighting || fog != null)
+		{
+			/* JSR-184 defines mesh fog distance as negative eye-space Z, independent
+			 * of whether the active projection is perspective, parallel or generic. */
 			posLocalToEye.set(tr);
 			posLocalToEye.postTranslate(scaleBias[1], scaleBias[2], scaleBias[3]);
 			posLocalToEye.postScale(scaleBias[0], scaleBias[0], scaleBias[0]);
@@ -849,6 +858,7 @@ public class Graphics3D
 				coY[0] = trisScreen[tri_id].yA(); coY[1] = trisScreen[tri_id].yB(); coY[2] = trisScreen[tri_id].yC();
 				coZ[0] = trisScreen[tri_id].zA(); coZ[1] = trisScreen[tri_id].zB(); coZ[2] = trisScreen[tri_id].zC();
 				coW[0] = trisScreen[tri_id].iwA(); coW[1] = trisScreen[tri_id].iwB(); coW[2] = trisScreen[tri_id].iwC();
+				coFog[0] = trisScreen[tri_id].fogA(); coFog[1] = trisScreen[tri_id].fogB(); coFog[2] = trisScreen[tri_id].fogC();
 
 				if(hasDepthOffset)
 				{
@@ -958,6 +968,15 @@ public class Graphics3D
 				float yC = trisScreen[tri_id].yC();
 
 				float denominator = (xB - xA) * (yC - yA) - (xC - xA) * (yB - yA);
+
+				if (fog != null && M3GMath.abs(denominator) > M3GMath.EPSILON)
+				{
+					final float invDet = 1.0f / denominator;
+					final float dFogB = coFog[1] - coFog[0];
+					final float dFogC = coFog[2] - coFog[0];
+					fogStepX = (dFogB * (yC - yA) - dFogC * (yB - yA)) * invDet;
+					fogStepY = (dFogC * (xB - xA) - dFogB * (xC - xA)) * invDet;
+				}
 
 				// Calculate the starting vertex color with the barycentric of the
 				// triangle. Then at each scanline we only need to determine the
@@ -1468,9 +1487,13 @@ public class Graphics3D
 			float pw = pwL + (sampleX - xL) * pwStep;
 			float z  = zL + (sampleX - xL) * zStep + depthOffset;
 			float drawX = (sampleX - xL) * invDrawSpanWidth;
+			float fogDepthOverW = trisScreen[tri_id].fogA() +
+				(sampleX - trisScreen[tri_id].xA()) * fogStepX +
+				(sampleY - trisScreen[tri_id].yA()) * fogStepY;
 
 			// Draw the pixels for the current y-coordinate
-			for (int x = ixL; x < ixR; x++, z += zStep, pw += pwStep, drawX += invDrawSpanWidth, depthIdx++, rasterIdx++)
+			for (int x = ixL; x < ixR; x++, z += zStep, pw += pwStep,
+				fogDepthOverW += fogStepX, drawX += invDrawSpanWidth, depthIdx++, rasterIdx++)
 			{
 				// This check is really only used for wireframe debugging, and it's not a perfect wireframe rendering
 				if(Mobile.M3GRenderWireframe && x > ixL && x < ixR) { continue; }
@@ -1567,8 +1590,9 @@ public class Graphics3D
 				// To blend the fog value here, we have to take the current pixel's z value into consideration
 				if (fog != null)
 				{
-					// Fog is always perspective-correct
-					final float zEye = M3GMath.fastReciprocal(pw);
+					/* JSR-184 states that fog distance is -Z in eye coordinates. Interpolate
+					 * depth/w and divide by interpolated 1/w so generic projections are valid. */
+					final float zEye = fogDepthOverW / pw;
 
 					if (fog.getMode() == Fog.LINEAR)
 					{

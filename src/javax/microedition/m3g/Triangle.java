@@ -33,6 +33,8 @@ class Triangle
 	// Temporary buffer for input and output vertices/texCoords/vertex colors.
 	private static final int[] inC = new int[3];
 	private static final int[] outC = new int[4];
+	private static final float[] inFog = new float[3];
+	private static final float[] outFog = new float[4];
 	private static final float[] inV = new float[12];
 	private static final float[][] inT = new float[Graphics3D.NUM_TEXTURE_UNITS][12];
 	private static final float[] outV = new float[16];
@@ -46,8 +48,9 @@ class Triangle
 
 	private final int[] colors = new int[3];
 
-	/* 1/w of each vertex after projection, for perspective-correct texture mapping. */
+	/* 1/w of each vertex after projection, for perspective-correct attributes. */
 	private final float[] invW = new float[] { 1f, 1f, 1f };
+	private final float[] fogDepth = new float[3];
 
 	private final float[] v = new float[12];
 		// xA, yA, zA, wA,
@@ -109,6 +112,7 @@ class Triangle
 				final int idx = 4 * tris[3 * tri_id + i];
 				Triangle.inV[4*i]   = vert[idx];     Triangle.inV[4*i+1] = vert[idx + 1];
 				Triangle.inV[4*i+2] = vert[idx + 2]; Triangle.inV[4*i+3] = vert[idx + 3];
+				Triangle.inFog[i] = (eyePos != null) ? -eyePos[idx + 2] : 0.0f;
 
 				for (int u = 0; u < Graphics3D.NUM_TEXTURE_UNITS; u++)
 				{
@@ -177,7 +181,8 @@ class Triangle
 			 * positions, texture coordinates and vertex colors before perspective division.
 			 */
 			final int outCount = clipNearPlane(Triangle.inV, Triangle.inT, Triangle.inC,
-				hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
+				Triangle.inFog, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC,
+				Triangle.outFog);
 
 			if (outCount < 3) { continue; }
 
@@ -186,6 +191,7 @@ class Triangle
 			{
 				final Triangle tri = Triangle.result[renderableTriangles[0]];
 				tri.setVertexCoords(Triangle.outV, fan);
+				tri.setFogDepth(Triangle.outFog, fan);
 
 				final boolean isFrontFace = polygonClockwise ? !tri.isCounterClockwise() : tri.isCounterClockwise();
 
@@ -488,8 +494,8 @@ class Triangle
 	 * its vertex count. Positions, texture coordinates and vertex colors
 	 * interpolate linearly in clip space, which is exact for all.
 	 */
-	private static final int clipNearPlane(float[] inV, float[][] inT, int[] inC,
-		boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC)
+	private static final int clipNearPlane(float[] inV, float[][] inT, int[] inC, float[] inFog,
+		boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC, float[] outFog)
 	{
 		int outCount = 0;
 
@@ -513,6 +519,7 @@ class Triangle
 				}
 
 				if (inC != null) { outC[outCount] = inC[i]; }
+				outFog[outCount] = inFog[i];
 				outCount++;
 			}
 			if (insideI != insideJ)
@@ -546,6 +553,7 @@ class Triangle
 
 					outC[outCount] = rb | (ag << 8);
 				}
+				outFog[outCount] = inFog[i] + amt * (inFog[j] - inFog[i]);
 				outCount++;
 			}
 		}
@@ -590,6 +598,7 @@ class Triangle
 			/* Keep 1/w around: the rasterizer interpolates s/w, t/w and 1/w linearly in
 			 * screen space and divides per-pixel for perspective-correct texturing. */
 			invW[i] = (w > M3GMath.EPSILON) ? (1f / w) : 1f;
+			fogDepth[i] *= invW[i];
 
 			// Project vertex
 			v[4 * i + 0] /= w; // x / w
@@ -645,6 +654,9 @@ class Triangle
 	public final float iwA() { return invW[0]; }
 	public final float iwB() { return invW[1]; }
 	public final float iwC() { return invW[2]; }
+	public final float fogA() { return fogDepth[0]; }
+	public final float fogB() { return fogDepth[1]; }
+	public final float fogC() { return fogDepth[2]; }
 
 	public final int colorA() { return colors[0]; }
 	public final int colorB() { return colors[1]; }
@@ -677,6 +689,13 @@ class Triangle
 	}
 
 	// This one is also for memory reuse, so `this.colors` is expected to be allocated by now.
+	public final void setFogDepth(float[] depths, int fan)
+	{
+		fogDepth[0] = depths[0];
+		fogDepth[1] = depths[fan + 1];
+		fogDepth[2] = depths[fan + 2];
+	}
+
 	public final void setVertexColors(int[] vColors, int fan)
 	{
 		this.hasVertexColors = (vColors != null);
