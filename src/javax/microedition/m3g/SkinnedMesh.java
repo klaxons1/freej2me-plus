@@ -23,8 +23,7 @@ public class SkinnedMesh extends Mesh
 	public Group skeleton;
 
 	private VertexBuffer skinnedVertices;
-	private final ArrayList<BoneData> bones = new ArrayList<BoneData>();
-	private boolean initBindSet;
+	private ArrayList<BoneData> bones = new ArrayList<BoneData>();
 
 	// Used to store bone information for vertex transforms.
 	private static class BoneData
@@ -72,12 +71,13 @@ public class SkinnedMesh extends Mesh
 		Group copySkeleton = (Group) this.skeleton.duplicate();
 		copy.skeleton = copySkeleton;
 		copy.skeleton.setParent(copy);
-		copy.initBindSet = false;
 		copy.addReference(copySkeleton);
+		copy.skinnedVertices = null;
+		copy.bones = new ArrayList<BoneData>();
 
 		for (BoneData b : this.bones)
 		{
-			Node clonedBone = findNodeInTree(copySkeleton, b.bone);
+			Node clonedBone = findCorrespondingNode(this.skeleton, copySkeleton, b.bone);
 			if (clonedBone != null)
 			{
 				BoneData copyBone = new BoneData(clonedBone, b.weight, b.firstVertex, b.numVertices);
@@ -94,83 +94,66 @@ public class SkinnedMesh extends Mesh
 		if (bone == null) { throw new NullPointerException("Bone node cannot be null"); }
 		if (weight <= 0) { throw new IllegalArgumentException("Weight must be positive"); }
 		if (numVertices <= 0) { throw new IllegalArgumentException("NumVertices must be positive"); }
-
-		VertexBuffer vbuf = getVertexBuffer();
-		int maxVertices = (vbuf != null) ? vbuf.getVertexCount() : 65535;
-
-		if (firstVertex < 0 || (firstVertex + numVertices) > maxVertices)
-		{
-			throw new IndexOutOfBoundsException("Vertex range [" + firstVertex + ", " + (firstVertex + numVertices) + "] out of bounds (max: " + maxVertices + ")");
-		}
-
+		if (firstVertex < 0 || (long) firstVertex + numVertices > 65535L)
+			{ throw new IndexOutOfBoundsException("Bone vertex range is out of bounds"); }
 		if (!isChildOf(this.skeleton, bone) && bone != this.skeleton)
-		{
-			throw new IllegalArgumentException("Bone node must be part of the skeleton group hierarchy");
-		}
+			{ throw new IllegalArgumentException("Bone node must belong to the skeleton"); }
 
 		BoneData data = new BoneData(bone, weight, firstVertex, numVertices);
+		/* JSR-184 states that B is this.getTransformTo(bone) at the instant
+		 * addTransform is called, not when the mesh is first rendered. */
+		if (!this.getTransformTo(bone, data.initialTransform))
+			{ throw new ArithmeticException("At-rest bone transform cannot be computed"); }
 
-		this.dirtyBits[1] = true;
-		this.initBindSet = false;
 		bones.add(data);
 		bone.hasBones = true;
+		this.dirtyBits[1] = true;
 	}
 
 	public void getBoneTransform(Node bone, Transform transform)
 	{
 		if (bone == null || transform == null)
-		{
-			throw new NullPointerException("Bone and Transform cannot be null");
-		}
+			{ throw new NullPointerException("Bone and Transform cannot be null"); }
+		if (!isChildOf(this.skeleton, bone) && bone != this.skeleton)
+			{ throw new IllegalArgumentException("Node is not in this skeleton"); }
 
-		initBindPoses();
-
-		for (BoneData b : bones)
+		for (BoneData data : bones)
 		{
-			if (b.bone == bone)
+			if (data.bone == bone)
 			{
-				transform.set(b.initialTransform);
+				transform.set(data.initialTransform);
 				return;
 			}
 		}
-		throw new IllegalArgumentException("Node is not a bone in this SkinnedMesh");
+		/* The value is explicitly undefined for a skeleton node without vertices. */
+		transform.setIdentity();
 	}
 
 	public int getBoneVertices(Node bone, int[] indices, float[] weights)
 	{
 		if (bone == null) { throw new NullPointerException("Bone node cannot be null"); }
+		if (!isChildOf(this.skeleton, bone) && bone != this.skeleton)
+			{ throw new IllegalArgumentException("Node is not in this skeleton"); }
 
+		int vertexLimit = 0;
+		for (BoneData data : bones)
+			{ vertexLimit = M3GMath.max(vertexLimit, data.firstVertex + data.numVertices); }
+		int[][] selected = selectInfluences(vertexLimit, false);
 		int count = 0;
-		for (BoneData b : bones)
-		{
-			if (b.bone == bone) { count += b.numVertices; }
-		}
+		for (int vertex = 0; vertex < vertexLimit; vertex++)
+			{ if (selectedWeight(selected[vertex], bone) > 0.0f) { count++; } }
+		if ((indices != null && indices.length < count) || (weights != null && weights.length < count))
+			{ throw new IllegalArgumentException("Result array is too short"); }
 
-		if (count == 0) { return 0; }
-
-		if (indices != null && indices.length < count)
+		int result = 0;
+		for (int vertex = 0; vertex < vertexLimit; vertex++)
 		{
-			throw new IllegalArgumentException("Indices array length too small (needed " + count + ")");
+			float boneWeight = selectedWeight(selected[vertex], bone);
+			if (boneWeight <= 0.0f) { continue; }
+			if (indices != null) { indices[result] = vertex; }
+			if (weights != null) { weights[result] = boneWeight / totalWeight(selected[vertex]); }
+			result++;
 		}
-		if (weights != null && weights.length < count)
-		{
-			throw new IllegalArgumentException("Weights array length too small (needed " + count + ")");
-		}
-
-		int idx = 0;
-		for (BoneData b : bones)
-		{
-			if (b.bone == bone)
-			{
-				for (int i = 0; i < b.numVertices; i++)
-				{
-					if (indices != null) { indices[idx] = b.firstVertex + i; }
-					if (weights != null) { weights[idx] = b.weight; }
-					idx++;
-				}
-			}
-		}
-
 		return count;
 	}
 
@@ -179,226 +162,266 @@ public class SkinnedMesh extends Mesh
 	private void checkSkeleton(Group skeleton)
 	{
 		if (skeleton == null) { throw new NullPointerException("Skeleton cannot be null"); }
+		if (skeleton instanceof World) { throw new IllegalArgumentException("Skeleton cannot be a World"); }
 		if (skeleton.getParent() != null) { throw new IllegalArgumentException("Skeleton already has a parent"); }
 	}
 
-	private static Node findNodeInTree(Node root, Node target)
+	private static Node findCorrespondingNode(Node original, Node copy, Node target)
 	{
-		if (root == target) { return root; }
-
-		if (root instanceof Group)
+		if (original == target) { return copy; }
+		if (original instanceof Group && copy instanceof Group)
 		{
-			Group g = (Group) root;
-			for (int i = 0; i < g.getChildCount(); i++)
+			Group originalGroup = (Group) original;
+			Group copyGroup = (Group) copy;
+			for (int i = 0; i < originalGroup.getChildCount(); i++)
 			{
-				Node found = findNodeInTree(g.getChild(i), target);
+				Node found = findCorrespondingNode(originalGroup.getChild(i),
+					copyGroup.getChild(i), target);
 				if (found != null) { return found; }
 			}
 		}
-
 		return null;
 	}
 
 	@Override
 	public VertexBuffer getVertexBuffer()
 	{
-		// TODO: Not working properly yet, tested in Solid Weapon 2 3D.
 		VertexBuffer base = super.getVertexBuffer();
-		if (bones.isEmpty() || base == null)
+		if (bones.isEmpty() || base == null) { return base; }
+
+		VertexArray positions = base.getPositions(null);
+		if (positions == null) { return base; }
+		for (BoneData data : bones)
 		{
-			return base;
+			/* JSR-184 defers these checks because VertexBuffer length can change. */
+			if ((long) data.firstVertex + data.numVertices > positions.getVertexCount())
+				{ throw new IllegalStateException("Bone vertex range exceeds the VertexBuffer"); }
 		}
 
-		initBindPoses();
-
-		if (skinnedVertices == null)
-		{
-			skinnedVertices = (VertexBuffer) base.duplicate();
-
-			// DEEP COPY position array so base is never mutated
-			float[] scaleBias = new float[4];
-			VertexArray basePositions = base.getPositions(scaleBias);
-			if (basePositions != null)
-			{
-				VertexArray clonedPositions = (VertexArray) basePositions.duplicate();
-				skinnedVertices.setPositions(clonedPositions, scaleBias[0],
-					new float[] { scaleBias[1], scaleBias[2], scaleBias[3] });
-			}
-		}
-
-		// TODO: Try checking against dirtyBits[1] later, it should be true
-		// whenever the underlying transformable changes.
+		createSkinnedBuffer(base);
 		applySkinning(base);
-
 		return skinnedVertices;
 	}
 
-	private void initBindPoses()
+	private void createSkinnedBuffer(VertexBuffer base)
 	{
-		if (this.initBindSet) { return; }
-
-		Transform boneToMesh = new Transform();
-		for (int i = 0; i < bones.size(); i++)
+		skinnedVertices = new VertexBuffer();
+		skinnedVertices.setDefaultColor(base.getDefaultColor());
+		float[] scaleBias = new float[4];
+		VertexArray array = base.getPositions(scaleBias);
+		if (array != null)
 		{
-			BoneData bd = (BoneData) bones.get(i);
-			if (bd.bone.getTransformTo(this, boneToMesh))
-            {
-                bd.initialTransform.set(boneToMesh);
-                bd.initialTransform.invert();
-            }
-            else { bd.initialTransform.setIdentity(); }
+			/* A zero source scale still permits bones to separate coincident vertices;
+			 * use unit output quantization so those transformed positions remain representable. */
+			final float outputScale = (scaleBias[0] != 0.0f) ? scaleBias[0] : 1.0f;
+			skinnedVertices.setPositions((VertexArray) array.duplicate(), outputScale,
+				new float[] { scaleBias[1], scaleBias[2], scaleBias[3] });
 		}
-		this.initBindSet = true;
+		array = base.getNormals();
+		if (array != null) { skinnedVertices.setNormals((VertexArray) array.duplicate()); }
+		array = base.getColors();
+		if (array != null) { skinnedVertices.setColors(array); }
+		for (int unit = 0; unit < Graphics3D.NUM_TEXTURE_UNITS; unit++)
+		{
+			array = base.getTexCoords(unit, scaleBias);
+			if (array != null)
+			{
+				float[] bias = new float[array.getComponentCount()];
+				System.arraycopy(scaleBias, 1, bias, 0, bias.length);
+				skinnedVertices.setTexCoords(unit, array, scaleBias[0], bias);
+			}
+		}
+	}
+
+	private int[][] selectInfluences(int vertexCount, boolean validate)
+	{
+		final int limit = Graphics3D.MAX_TRANSFORMS_PER_VERTEX;
+		int[][] selected = new int[vertexCount][limit];
+		for (int vertex = 0; vertex < vertexCount; vertex++)
+			{ for (int slot = 0; slot < limit; slot++) { selected[vertex][slot] = -1; } }
+
+		for (int influence = 0; influence < bones.size(); influence++)
+		{
+			BoneData data = bones.get(influence);
+			int end = data.firstVertex + data.numVertices;
+			if (validate && end > vertexCount)
+				{ throw new IllegalStateException("Bone vertex range exceeds the VertexBuffer"); }
+			end = M3GMath.min(end, vertexCount);
+			for (int vertex = data.firstVertex; vertex < end; vertex++)
+			{
+				int slot = 0;
+				while (slot < limit && selected[vertex][slot] >= 0 &&
+					bones.get(selected[vertex][slot]).weight >= data.weight) { slot++; }
+				if (slot == limit) { continue; }
+				for (int move = limit - 1; move > slot; move--)
+					{ selected[vertex][move] = selected[vertex][move - 1]; }
+				selected[vertex][slot] = influence;
+			}
+		}
+		return selected;
 	}
 
 	private void applySkinning(VertexBuffer base)
-    {
-    	// TODO: Vertex Normals and Colors
-        float[] scaleBias = new float[4];
-        VertexArray basePositions = base.getPositions(scaleBias);
-        VertexArray blendedPositions = skinnedVertices.getPositions(null);
+	{
+		float[] scaleBias = new float[4];
+		VertexArray basePositions = base.getPositions(scaleBias);
+		VertexArray outPositions = skinnedVertices.getPositions(null);
+		final int vertexCount = basePositions.getVertexCount();
+		final int[][] selected = selectInfluences(vertexCount, true);
 
-        if (basePositions == null || blendedPositions == null) { return; }
+		float[][] positionMatrices = new float[bones.size()][16];
+		float[][] normalMatrices = new float[bones.size()][16];
+		Transform boneToMesh = new Transform();
+		Transform skin = new Transform();
+		for (int i = 0; i < bones.size(); i++)
+		{
+			BoneData data = bones.get(i);
+			if (!data.bone.getTransformTo(this, boneToMesh))
+				{ throw new ArithmeticException("Current bone transform cannot be computed"); }
+			skin.set(boneToMesh);
+			skin.postMultiply(data.initialTransform);
+			skin.get(positionMatrices[i]);
+			try
+			{
+				skin.invert();
+				skin.transpose();
+			}
+			catch (ArithmeticException undefinedNormalTransform)
+			{
+				/* Singular skinning leaves normals undefined; keep a deterministic
+				 * direction transform without failing otherwise valid rendering. */
+				skin.set(boneToMesh);
+				skin.postMultiply(data.initialTransform);
+			}
+			skin.get(normalMatrices[i]);
+		}
 
-        int numVertices = basePositions.getVertexCount();
-        int components = basePositions.getComponentCount();
-        int totalElements = numVertices * components;
+		float[] sourcePositions = readSigned(basePositions);
+		float[] resultPositions = new float[sourcePositions.length];
+		final float scale = scaleBias[0];
+		final float biasX = scaleBias[1], biasY = scaleBias[2], biasZ = scaleBias[3];
+		for (int vertex = 0; vertex < vertexCount; vertex++)
+		{
+			int offset = 3 * vertex;
+			float x = sourcePositions[offset] * scale + biasX;
+			float y = sourcePositions[offset + 1] * scale + biasY;
+			float z = sourcePositions[offset + 2] * scale + biasZ;
+			float totalWeight = totalWeight(selected[vertex]);
+			if (totalWeight == 0.0f)
+			{
+				// No explicit bone means an implicit identity association with this mesh.
+				resultPositions[offset] = x;
+				resultPositions[offset + 1] = y;
+				resultPositions[offset + 2] = z;
+			}
+			else
+			{
+				for (int slot = 0; slot < Graphics3D.MAX_TRANSFORMS_PER_VERTEX; slot++)
+				{
+					int influence = selected[vertex][slot];
+					if (influence < 0) { break; }
+					float weight = bones.get(influence).weight / totalWeight;
+					float[] m = positionMatrices[influence];
+					/* Transform stores row-major matrices and multiplies column vectors. */
+					resultPositions[offset] += weight * (m[0]*x + m[1]*y + m[2]*z + m[3]);
+					resultPositions[offset + 1] += weight * (m[4]*x + m[5]*y + m[6]*z + m[7]);
+					resultPositions[offset + 2] += weight * (m[8]*x + m[9]*y + m[10]*z + m[11]);
+				}
+			}
+			final float outputScale = (scale != 0.0f) ? scale : 1.0f;
+			resultPositions[offset] = (resultPositions[offset] - biasX) / outputScale;
+			resultPositions[offset + 1] = (resultPositions[offset + 1] - biasY) / outputScale;
+			resultPositions[offset + 2] = (resultPositions[offset + 2] - biasZ) / outputScale;
+		}
+		writeSigned(outPositions, resultPositions);
 
-        float scale = scaleBias[0];
-        float invScale = (scale != 0.0f) ? (1.0f / scale) : 1.0f;
-        float biasX = scaleBias[1], biasY = scaleBias[2], biasZ = scaleBias[3];
+		VertexArray baseNormals = base.getNormals();
+		VertexArray outNormals = skinnedVertices.getNormals();
+		if (baseNormals == null || outNormals == null) { return; }
+		float[] sourceNormals = readSigned(baseNormals);
+		float[] resultNormals = new float[sourceNormals.length];
+		for (int vertex = 0; vertex < vertexCount; vertex++)
+		{
+			int offset = 3 * vertex;
+			float totalWeight = totalWeight(selected[vertex]);
+			if (totalWeight == 0.0f)
+			{
+				resultNormals[offset] = sourceNormals[offset];
+				resultNormals[offset + 1] = sourceNormals[offset + 1];
+				resultNormals[offset + 2] = sourceNormals[offset + 2];
+				continue;
+			}
+			for (int slot = 0; slot < Graphics3D.MAX_TRANSFORMS_PER_VERTEX; slot++)
+			{
+				int influence = selected[vertex][slot];
+				if (influence < 0) { break; }
+				float weight = bones.get(influence).weight / totalWeight;
+				float[] m = normalMatrices[influence];
+				float x = sourceNormals[offset], y = sourceNormals[offset + 1], z = sourceNormals[offset + 2];
+				resultNormals[offset] += weight * (m[0]*x + m[1]*y + m[2]*z);
+				resultNormals[offset + 1] += weight * (m[4]*x + m[5]*y + m[6]*z);
+				resultNormals[offset + 2] += weight * (m[8]*x + m[9]*y + m[10]*z);
+			}
+		}
+		writeSigned(outNormals, resultNormals);
+	}
 
-        int numBones = bones.size();
-        float[][] skinningMatrices = new float[numBones][16];
-        Transform boneToMesh = new Transform();
-        Transform finalSkinning = new Transform();
+	private float selectedWeight(int[] selected, Node bone)
+	{
+		float total = 0.0f;
+		for (int slot = 0; slot < selected.length && selected[slot] >= 0; slot++)
+		{
+			BoneData data = bones.get(selected[slot]);
+			if (data.bone == bone) { total += data.weight; }
+		}
+		return total;
+	}
 
-        for (int b = 0; b < numBones; b++)
-        {
-            BoneData data = bones.get(b);
+	private float totalWeight(int[] selected)
+	{
+		float total = 0.0f;
+		for (int slot = 0; slot < selected.length && selected[slot] >= 0; slot++)
+			{ total += bones.get(selected[slot]).weight; }
+		return total;
+	}
 
-            // 1. Current Bone -> Mesh in animated pose
-            if (!data.bone.getTransformTo(this, boneToMesh))
-            {
-                boneToMesh.setIdentity();
-            }
+	private static float[] readSigned(VertexArray array)
+	{
+		int count = array.getVertexCount();
+		int elements = count * array.getComponentCount();
+		float[] result = new float[elements];
+		if (array.getComponentType() == 1)
+		{
+			byte[] values = new byte[elements];
+			array.get(0, count, values);
+			for (int i = 0; i < elements; i++) { result[i] = values[i]; }
+		}
+		else
+		{
+			short[] values = new short[elements];
+			array.get(0, count, values);
+			for (int i = 0; i < elements; i++) { result[i] = values[i]; }
+		}
+		return result;
+	}
 
-            // 2. Multiply by Mesh -> Bone reference pose (Inverse Bind Pose)
-            finalSkinning.set(boneToMesh);
-            finalSkinning.postMultiply(data.initialTransform);
-            finalSkinning.get(skinningMatrices[b]);
-        }
+	private static void writeSigned(VertexArray array, float[] values)
+	{
+		int count = array.getVertexCount();
+		if (array.getComponentType() == 1)
+		{
+			byte[] result = new byte[values.length];
+			for (int i = 0; i < values.length; i++)
+				{ result[i] = (byte) M3GMath.max(-128, M3GMath.min(127, M3GMath.round(values[i]))); }
+			array.set(0, count, result);
+		}
+		else
+		{
+			short[] result = new short[values.length];
+			for (int i = 0; i < values.length; i++)
+				{ result[i] = (short) M3GMath.max(-32768, M3GMath.min(32767, M3GMath.round(values[i]))); }
+			array.set(0, count, result);
+		}
+	}
 
-        int componentType = basePositions.getComponentType();
-        float[] floatPos = new float[totalElements];
-
-        if (componentType == 1) // byte
-        {
-            byte[] rawBytes = new byte[totalElements];
-            basePositions.get(0, numVertices, rawBytes);
-            for (int i = 0; i < totalElements; i++) floatPos[i] = rawBytes[i];
-        }
-        else if (componentType == 2) // short
-        {
-            short[] rawShorts = new short[totalElements];
-            basePositions.get(0, numVertices, rawShorts);
-            for (int i = 0; i < totalElements; i++) floatPos[i] = rawShorts[i];
-        }
-
-        float[] accumulatedX = new float[numVertices];
-        float[] accumulatedY = new float[numVertices];
-        float[] accumulatedZ = new float[numVertices];
-        float[] weightSums = new float[numVertices];
-
-        for (int b = 0; b < numBones; b++)
-        {
-            BoneData bd = bones.get(b);
-            float[] m = skinningMatrices[b];
-            float w = (float) bd.weight;
-
-            for (int i = 0; i < bd.numVertices; i++)
-            {
-                int vIdx = bd.firstVertex + i;
-                int offset = vIdx * components;
-
-                // De-quantize position to object space units
-                float x = floatPos[offset] * scale + biasX;
-                float y = floatPos[offset + 1] * scale + biasY;
-                float z = (components > 2) ? (floatPos[offset + 2] * scale + biasZ) : 0.0f;
-
-                accumulatedX[vIdx] += (m[0] * x + m[4] * y + m[8] * z + m[12]) * w;
-                accumulatedY[vIdx] += (m[1] * x + m[5] * y + m[9] * z + m[13]) * w;
-                if (components > 2)
-                {
-                    accumulatedZ[vIdx] += (m[2] * x + m[6] * y + m[10] * z + m[14]) * w;
-                }
-                weightSums[vIdx] += w;
-            }
-        }
-
-        if (componentType == 1) // byte write-back
-        {
-            byte[] outRaw = new byte[totalElements];
-            for (int i = 0; i < numVertices; i++)
-            {
-                int offset = i * components;
-                float totalW = weightSums[i];
-                float finalX, finalY, finalZ;
-
-                if (totalW > 0.0001f)
-                {
-                    float invW = 1.0f / totalW;
-                    finalX = accumulatedX[i] * invW;
-                    finalY = accumulatedY[i] * invW;
-                    finalZ = accumulatedZ[i] * invW;
-                }
-                else
-                {
-                    finalX = floatPos[offset] * scale + biasX;
-                    finalY = floatPos[offset + 1] * scale + biasY;
-                    finalZ = (components > 2) ? (floatPos[offset + 2] * scale + biasZ) : 0.0f;
-                }
-
-                outRaw[offset]     = (byte) M3GMath.max(-128, M3GMath.min(127, M3GMath.round((finalX - biasX) * invScale)));
-                outRaw[offset + 1] = (byte) M3GMath.max(-128, M3GMath.min(127, M3GMath.round((finalY - biasY) * invScale)));
-                if (components > 2)
-                {
-                    outRaw[offset + 2] = (byte) M3GMath.max(-128, M3GMath.min(127, M3GMath.round((finalZ - biasZ) * invScale)));
-                }
-            }
-            blendedPositions.set(0, numVertices, outRaw);
-        }
-        else if (componentType == 2) // short write-back
-        {
-            short[] outRaw = new short[totalElements];
-            for (int i = 0; i < numVertices; i++)
-            {
-                int offset = i * components;
-                float totalW = weightSums[i];
-                float finalX, finalY, finalZ;
-
-                if (totalW > 0.0001f)
-                {
-                    float invW = 1.0f / totalW;
-                    finalX = accumulatedX[i] * invW;
-                    finalY = accumulatedY[i] * invW;
-                    finalZ = accumulatedZ[i] * invW;
-                }
-                else
-                {
-                    finalX = floatPos[offset] * scale + biasX;
-                    finalY = floatPos[offset + 1] * scale + biasY;
-                    finalZ = (components > 2) ? (floatPos[offset + 2] * scale + biasZ) : 0.0f;
-                }
-
-                outRaw[offset]     = (short) M3GMath.max(-32768, M3GMath.min(32767, M3GMath.round((finalX - biasX) * invScale)));
-                outRaw[offset + 1] = (short) M3GMath.max(-32768, M3GMath.min(32767, M3GMath.round((finalY - biasY) * invScale)));
-                if (components > 2)
-                {
-                    outRaw[offset + 2] = (short) M3GMath.max(-32768, M3GMath.min(32767, M3GMath.round((finalZ - biasZ) * invScale)));
-                }
-            }
-            blendedPositions.set(0, numVertices, outRaw);
-        }
-    }
 }
