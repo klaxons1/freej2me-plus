@@ -55,7 +55,11 @@ public class Graphics3D
 	public static final boolean SUPPORT_ANTIALIASING = true;
 	public static final boolean SUPPORT_TRUE_COLOR = true;
 	public static final boolean SUPPORT_DITHERING = true;
-	public static final boolean SUPPORT_MIPMAPPING = true;
+	/*
+	 * JSR-184 states that supportMipmapping must describe actual level-filtering
+	 * support. This rasterizer stores and samples only the base Image2D level.
+	 */
+	public static final boolean SUPPORT_MIPMAPPING = false;
 	public static final boolean SUPPORT_PERSPECTIVE_CORRECTION = true;
 	public static final boolean SUPPORT_LOCAL_CAMERA_LIGHTING = true;
 	public static final int MAX_LIGHTS = 32;
