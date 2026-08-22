@@ -935,7 +935,7 @@ public class Graphics3D
 				{
 					if (M3GMath.abs(denominator) > M3GMath.EPSILON)
 					{
-						float invDet = M3GMath.fastReciprocal(denominator);
+							float invDet = 1.0f / denominator;
 
 						int colorA = trisScreen[tri_id].colorA();
 						int colorB = trisScreen[tri_id].colorB();
@@ -968,9 +968,13 @@ public class Graphics3D
 				// Draw both halves of the triangle
 				for (int half = 0; half < 2; half++)
 				{
-					// Determine the range for the y-coordinate, clipped without changing viewport mapping.
-					yStart = half == 0 ? M3GMath.max(M3GMath.roundPositive(yTop), viewportClipTop) : M3GMath.max(M3GMath.roundPositive(yMid), viewportClipTop);
-					yEnd = half == 0 ? M3GMath.min(M3GMath.roundPositive(yMid), viewportClipBottom) : M3GMath.min(M3GMath.roundPositive(yBot), viewportClipBottom);
+					/*
+					 * Window coordinates locate pixel boundaries, while fragments are sampled
+					 * at half-integer centers. Include the top edge and exclude the bottom edge
+					 * so adjacent triangles assign a boundary sample to exactly one primitive.
+					 */
+					yStart = half == 0 ? M3GMath.max(firstFragment(yTop), viewportClipTop) : M3GMath.max(firstFragment(yMid), viewportClipTop);
+					yEnd = half == 0 ? M3GMath.min(firstFragment(yMid), viewportClipBottom) : M3GMath.min(firstFragment(yBot), viewportClipBottom);
 
 					renderTriangleHalf(vertices, half, yStart, yEnd, trisScreen, tri_id, hasColors, hasTexture, compositingMode,
 						fog, invFogDiv, alphaThreshold, depthEnabled, colorEnabled, depthOffset, perspectiveCorrection);
@@ -1264,6 +1268,56 @@ public class Graphics3D
 		}
 	}
 
+	/* Returns the first pixel whose half-integer center is on or after an edge. */
+	private static final int firstFragment(float edge)
+	{
+		if (edge >= Integer.MAX_VALUE) { return Integer.MAX_VALUE; }
+		if (edge <= Integer.MIN_VALUE) { return Integer.MIN_VALUE; }
+		return -M3GMath.floor(0.5f - edge); // ceil(edge - 0.5)
+	}
+
+	/*
+	 * Point-sampled triangle coverage with a top-left tie break. Computing an edge
+	 * from coefficients makes reversing a shared edge negate the exact same terms,
+	 * so independently rasterized adjacent triangles cannot both accept or reject it.
+	 */
+	private static final boolean coversFragment(Triangle triangle, int x, int y)
+	{
+		final float ax = triangle.xA(), ay = triangle.yA();
+		final float bx = triangle.xB(), by = triangle.yB();
+		final float cx = triangle.xC(), cy = triangle.yC();
+		final double sampleX = x + 0.5, sampleY = y + 0.5;
+		final double area = edgeValue(ax, ay, bx, by, cx, cy);
+		if (area == 0.0) { return false; }
+		final boolean reverse = area < 0.0;
+
+		return acceptsEdge(bx, by, cx, cy, sampleX, sampleY, reverse) &&
+			acceptsEdge(cx, cy, ax, ay, sampleX, sampleY, reverse) &&
+			acceptsEdge(ax, ay, bx, by, sampleX, sampleY, reverse);
+	}
+
+	private static final double edgeValue(float ax, float ay, float bx, float by,
+			double sampleX, double sampleY)
+	{
+		final double edgeA = (double) ay - by;
+		final double edgeB = (double) bx - ax;
+		final double edgeC = (double) ax * by - (double) bx * ay;
+		return (edgeA * sampleX + edgeB * sampleY) + edgeC;
+	}
+
+	private static final boolean acceptsEdge(float ax, float ay, float bx, float by,
+			double sampleX, double sampleY, boolean reverse)
+	{
+		double edge = edgeValue(ax, ay, bx, by, sampleX, sampleY);
+		if (reverse) { edge = -edge; }
+		if (edge > 0.0) { return true; }
+		if (edge < 0.0) { return false; }
+
+		final float dx = reverse ? ax - bx : bx - ax;
+		final float dy = reverse ? ay - by : by - ay;
+		return dy < 0.0f || (dy == 0.0f && dx > 0.0f);
+	}
+
 	private void renderTriangleHalf(VertexBuffer vertices, int half, int yStart, int yEnd,
 		Triangle[] trisScreen, int tri_id, boolean hasColors, boolean hasTexture, CompositingMode compositingMode,
 		Fog fog, float invFogDiv, int alphaThreshold, boolean depthEnabled, boolean colorEnabled,
@@ -1294,9 +1348,10 @@ public class Graphics3D
 			// Skip odd scanlines when in half res. The even scanlines repeat on the lower one as well
 			if(Mobile.halfResM3GRaster && (y & 1) != 0) { continue; }
 
+			final float sampleY = y + 0.5f;
 			float drawY = half == 0
-				? (y - yTop) / (yMid - yTop)  // Upper half
-				: 1f - (y - yMid) / (yBot - yMid); // Lower half
+				? (sampleY - yTop) / (yMid - yTop)  // Upper half
+				: 1f - (sampleY - yMid) / (yBot - yMid); // Lower half
 			drawY = M3GMath.min(drawY, 1f);
 
 			// Calculate interpolated values (xL and xR allow us to skip early, so do them first)
@@ -1307,15 +1362,22 @@ public class Graphics3D
 				? xTop + drawY * (xMidR - xTop)
 				: xBot + drawY * (xMidR - xBot);
 
-			int ixL = M3GMath.max(M3GMath.roundPositive(xL), viewportClipLeft);
-			int ixR = M3GMath.min(M3GMath.roundPositive(xR), viewportClipRight);
+			/*
+			 * The scanline intersections provide a narrow candidate span. Expand it by
+			 * one pixel before applying exact shared-edge coverage; independent floating
+			 * interpolation of a common edge can otherwise round in opposite directions.
+			 */
+			int ixL = M3GMath.max(firstFragment(xL), viewportClipLeft);
+			int ixR = M3GMath.min(firstFragment(xR), viewportClipRight);
+			if (ixL > viewportClipLeft) { ixL--; }
+			if (ixR < viewportClipRight) { ixR++; }
 
-			final int spanWidth = ixR - ixL;
+			while (ixL < ixR && !coversFragment(trisScreen[tri_id], ixL, y)) { ixL++; }
+			while (ixR > ixL && !coversFragment(trisScreen[tri_id], ixR - 1, y)) { ixR--; }
+			if (ixL >= ixR) { continue; }
 
-			if (spanWidth <= 0) { continue; }
-
-			// Saves a division for each x step.
-			final float invDrawSpanWidth = M3GMath.fastReciprocal(xR - xL);
+			// Compute this once per span; exact division avoids triangle-dependent UV drift.
+			final float invDrawSpanWidth = 1.0f / (xR - xL);
 
 			// Do we have vertex colors? If so, get the span edges' colors here,
 			// that way, the inner loop only needs to do a simple addition.
@@ -1325,8 +1387,8 @@ public class Graphics3D
 				float yA = trisScreen[tri_id].yA();
 				int colorA = trisScreen[tri_id].colorA();
 
-				float dx = ixL - xA;
-				float dy = y - yA;
+				float dx = ixL + 0.5f - xA;
+				float dy = sampleY - yA;
 
 				deltaA = ((colorA >> 24) & 0xFF) + dx * aStepX + dy * aStepY;
 				deltaR = ((colorA >> 16) & 0xFF) + dx * rStepX + dy * rStepY;
@@ -1367,9 +1429,10 @@ public class Graphics3D
 			final float zStep = (zR - zL) * invDrawSpanWidth;
 			final float pwStep = (pwR - pwL) * invDrawSpanWidth;
 
-			float pw = pwL + (ixL - xL) * pwStep;
-			float z  = zL + (ixL - xL) * zStep + depthOffset;
-			float drawX = (ixL - xL) * invDrawSpanWidth;
+			final float sampleX = ixL + 0.5f;
+			float pw = pwL + (sampleX - xL) * pwStep;
+			float z  = zL + (sampleX - xL) * zStep + depthOffset;
+			float drawX = (sampleX - xL) * invDrawSpanWidth;
 
 			// Draw the pixels for the current y-coordinate
 			for (int x = ixL; x < ixR; x++, z += zStep, pw += pwStep, drawX += invDrawSpanWidth, depthIdx++, rasterIdx++)
@@ -1442,10 +1505,9 @@ public class Graphics3D
 						}
 						else
 						{
-							// This minor EPSILON decrement fixes UV bounds in a number of games,
-							// such as Speed Spirit and 4x4 Extreme Rally 3D.
-							int texX = (int) ((s - M3GMath.EPSILON));
-							int texY = (int) ((t - M3GMath.EPSILON));
+							// OpenGL nearest filtering selects floor of the image-space coordinates.
+							int texX = M3GMath.floor(s);
+							int texY = M3GMath.floor(t);
 
 							texX = wrapX(texX, texW[i], texRepeatS[i], textures[i].isNPOT());
 							texY = wrapY(texY, texH[i], texRepeatT[i], textures[i].isNPOT());
