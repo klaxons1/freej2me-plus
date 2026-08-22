@@ -795,7 +795,12 @@ public class Graphics3D
 		float depthOffset = 0.0f;
 
 		final boolean colorEnabled = compositingMode.isColorWriteEnabled();
-		final int alphaThreshold = (int) (compositingMode.getAlphaThreshold() * 255);
+		/*
+		 * JSR-184 states that a fragment passes when its normalized alpha is greater
+		 * than or equal to the threshold. Ceil converts that comparison exactly to
+		 * 8-bit alpha and, importantly, leaves a zero threshold at zero.
+		 */
+		final int alphaThreshold = (int) Math.ceil(compositingMode.getAlphaThreshold() * 255.0f);
 
 		if (this.target instanceof Image2D)
 		{
@@ -1202,7 +1207,8 @@ public class Graphics3D
 
 		final CompositingMode compositingMode = appearance.getCompositingMode() != null ? appearance.getCompositingMode() : new CompositingMode();
 		final Fog fog = appearance.getFog();
-		final int alphaThreshold = (int) (compositingMode.getAlphaThreshold() * 255);
+		// JSR-184 uses alpha >= threshold; threshold zero must accept alpha zero.
+		final int alphaThreshold = (int) Math.ceil(compositingMode.getAlphaThreshold() * 255.0f);
 		final float alphaFactor = sprite.getAlphaFactor();
 		final boolean depthTest = compositingMode.isDepthTestEnabled() && isDepthBufferEnabled();
 		final boolean depthWrite = depthTest && compositingMode.isDepthWriteEnabled();
@@ -1251,7 +1257,7 @@ public class Graphics3D
 				paintPixel = img.getPixel(texX, texY);
 				alpha = (int) (((paintPixel >> 24) & 0xFF) * alphaFactor);
 
-				if (alpha < alphaThreshold || alpha == 0) { continue; }
+				if (alpha < alphaThreshold) { continue; }
 
 				if (fog != null && fogFactor < 255.0f)
 					{ paintPixel = blendPixels(paintPixel, fog.getColor(), (int) fogFactor, Graphics3D.BLEND_FOG, 0, 0); }
@@ -1520,16 +1526,11 @@ public class Graphics3D
 				}
 
 				/*
-				 * Alpha test BEFORE any depth write: transparent fragments must not
-				 * occlude geometry drawn later (games rely on this — e.g. tree canopies
-				 * with alpha cutouts drawn before the ground). The depth buffer is only
-				 * updated by fragments that survive this test.
-				 *
-				 * TODO: Spec says that a threshold of 0 should make ALL fragments go through,
-				 * but doing so evidently breaks transparency in apps like Speed Spirit, Coast Racer
-				 * and a few others on vegetation when the texel alpha is also 0. So what gives?
+				 * Alpha test BEFORE any depth write: rejected fragments must not occlude
+				 * geometry drawn later. JSR-184 states that alpha >= threshold passes,
+				 * therefore alpha zero also passes when the configured threshold is zero.
 				 */
-				if ((paintPixel >>> 24) == 0 || (paintPixel >>> 24) < alphaThreshold) { continue; }
+				if ((paintPixel >>> 24) < alphaThreshold) { continue; }
 
 				// Update the depth buffer if depth write is enabled
 				if (depthEnabled && compositingMode.isDepthWriteEnabled()) { this.depthBuffer[depthIdx] = z; }
