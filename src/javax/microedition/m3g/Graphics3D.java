@@ -73,11 +73,21 @@ public class Graphics3D
 
 	private static Graphics3D instance = null;
 
-	// Viewport
+	// Viewport and the rendering-target state captured by bindTarget
 	private int viewx;
 	private int viewy;
 	private int vieww;
 	private int viewh;
+	private int targetOriginX;
+	private int targetOriginY;
+	private int targetClipX;
+	private int targetClipY;
+	private int targetClipWidth;
+	private int targetClipHeight;
+	private int viewportClipLeft;
+	private int viewportClipTop;
+	private int viewportClipRight;
+	private int viewportClipBottom;
 
 	private boolean depthEnabled;
 	private float[] depthBuffer;
@@ -228,11 +238,18 @@ public class Graphics3D
 			if (i2d.getFormat() != Image2D.RGB && i2d.getFormat() != Image2D.RGBA)
 			{ throw new IllegalArgumentException("Received a 2D render target with invalid internal format"); }
 
-			/* It's a 2D image, so paint the canvas with it starting from the top-left corner */
+			canvasWidth = i2d.getWidth();
+			canvasHeight = i2d.getHeight();
+			targetOriginX = 0;
+			targetOriginY = 0;
+			targetClipX = 0;
+			targetClipY = 0;
+			targetClipWidth = canvasWidth;
+			targetClipHeight = canvasHeight;
 			this.viewx = 0;
 			this.viewy = 0;
-			this.vieww = i2d.getWidth();
-			this.viewh = i2d.getHeight();
+			this.vieww = canvasWidth;
+			this.viewh = canvasHeight;
 		}
 		else if (target instanceof Graphics)
 		{
@@ -241,10 +258,26 @@ public class Graphics3D
 			rasterData = ((PlatformGraphics) pgrp).getFrameBuffer();
 			canvasWidth = pgrp.getCanvas().getWidth();
 			canvasHeight = pgrp.getCanvas().getHeight();
-			this.viewx = M3GMath.max(0, pgrp.getClipX() + pgrp.getTranslateX());
-			this.viewy = M3GMath.max(0, pgrp.getClipY() + pgrp.getTranslateY());
-			this.vieww = M3GMath.min(canvasWidth, pgrp.getClipWidth());
-			this.viewh = M3GMath.min(canvasHeight, pgrp.getClipHeight());
+
+			/*
+			 * The viewport is relative to the Graphics origin at bind time. Capture both
+			 * that origin and the clip rectangle; later changes to either are not part of
+			 * the bound rendering target according to JSR-184.
+			 */
+			targetOriginX = pgrp.getTranslateX();
+			targetOriginY = pgrp.getTranslateY();
+			final int clipRight = M3GMath.min(canvasWidth - targetOriginX,
+				pgrp.getClipX() + pgrp.getClipWidth());
+			final int clipBottom = M3GMath.min(canvasHeight - targetOriginY,
+				pgrp.getClipY() + pgrp.getClipHeight());
+			targetClipX = M3GMath.max(-targetOriginX, pgrp.getClipX());
+			targetClipY = M3GMath.max(-targetOriginY, pgrp.getClipY());
+			targetClipWidth = M3GMath.max(0, clipRight - targetClipX);
+			targetClipHeight = M3GMath.max(0, clipBottom - targetClipY);
+			this.viewx = targetClipX;
+			this.viewy = targetClipY;
+			this.vieww = targetClipWidth;
+			this.viewh = targetClipHeight;
 		} else
 		{
 			/* If it is neither of those, throw an IllegalArgumentException as per JSR-184. */
@@ -261,7 +294,14 @@ public class Graphics3D
 			{ throw new IllegalArgumentException("Render target either has larger dimensions than supported, or the render hint is invalid"); }
 
 		this.target = target;
-		this.depthBuffer = new float[this.vieww * this.viewh];
+		updateViewportClip();
+
+		/*
+		 * Depth values belong to physical render-target pixels, not viewport-local
+		 * pixels. The viewport can change while a target is bound, so its dimensions
+		 * must never be used as either the depth-buffer size or row stride.
+		 */
+		this.depthBuffer = new float[canvasWidth * canvasHeight];
 		Arrays.fill(this.depthBuffer, this.far);
 		this.depthEnabled = depthBuffer;
 		this.hints = hints;
@@ -323,12 +363,12 @@ public class Graphics3D
 					final boolean repeatX = background.getImageModeX() == Background.REPEAT;
 					final boolean repeatY = background.getImageModeY() == Background.REPEAT;
 
-					for (int py = 0; py < viewh; py++)
+					for (int py = viewportClipTop; py < viewportClipBottom; py++)
 					{
 						int sy = cropY + (int) (py * cropH / viewh);
 						sy = wrapY(sy, bgImg.getHeight(), repeatY, bgImg.isPowerOfTwo(bgImg.getHeight()));
 
-						for (int px = 0; px < vieww; px++)
+						for (int px = viewportClipLeft; px < viewportClipRight; px++)
 						{
 							int sx = cropX + (int) (px * cropW / vieww);
 							sx = wrapY(sx, bgImg.getWidth(), repeatX, bgImg.isPowerOfTwo(bgImg.getWidth()));
@@ -353,16 +393,16 @@ public class Graphics3D
 							}
 
 							// Image format argument shouldn't matter here
-							rasterData[(py + viewy) * canvasWidth + (px + viewx)] =
-								blendPixels(rasterData[(py + viewy) * canvasWidth + (px + viewx)], paintPixel,
-									(paintPixel >> 24) & 0xFF, CompositingMode.ALPHA, 0, 0);
+							final int targetIndex = getTargetIndex(px, py);
+							rasterData[targetIndex] = blendPixels(rasterData[targetIndex], paintPixel,
+								(paintPixel >> 24) & 0xFF, CompositingMode.ALPHA, 0, 0);
 						}
 					}
 				}
 			}
 		}
 
-		if (clearDepth) { Arrays.fill(this.depthBuffer, this.far); }
+		if (clearDepth) { clearDepthBuffer(); }
 	}
 
 	public Camera getCamera(Transform transform)
@@ -937,9 +977,9 @@ public class Graphics3D
 				// Draw both halves of the triangle
 				for (int half = 0; half < 2; half++)
 				{
-					// Determine the range for the y-coordinate
-					yStart = half == 0 ? M3GMath.max(M3GMath.roundPositive(yTop), 0) : M3GMath.max(M3GMath.roundPositive(yMid), 0);
-					yEnd = half == 0 ? M3GMath.min(M3GMath.roundPositive(yMid), viewh) : M3GMath.min(M3GMath.roundPositive(yBot), viewh);
+					// Determine the range for the y-coordinate, clipped without changing viewport mapping.
+					yStart = half == 0 ? M3GMath.max(M3GMath.roundPositive(yTop), viewportClipTop) : M3GMath.max(M3GMath.roundPositive(yMid), viewportClipTop);
+					yEnd = half == 0 ? M3GMath.min(M3GMath.roundPositive(yMid), viewportClipBottom) : M3GMath.min(M3GMath.roundPositive(yBot), viewportClipBottom);
 
 					renderTriangleHalf(vertices, half, yStart, yEnd, trisScreen, tri_id, hasColors, hasTexture, compositingMode,
 						fog, invFogDiv, alphaThreshold, depthEnabled, colorEnabled, depthOffset, perspectiveCorrection);
@@ -1023,10 +1063,56 @@ public class Graphics3D
 		this.viewy = y;
 		this.vieww = width;
 		this.viewh = height;
+		if (this.target != null) { updateViewportClip(); }
 	}
 
 
 	/* Helper Methods */
+
+	private void updateViewportClip()
+	{
+		/*
+		 * Keep all raster coordinates viewport-local so clipping cannot alter the
+		 * projection. These bounds are the viewport's intersection with the target
+		 * clip rectangle captured at bindTarget.
+		 */
+		viewportClipLeft = clampViewportCoordinate((long) targetClipX - viewx, vieww);
+		viewportClipTop = clampViewportCoordinate((long) targetClipY - viewy, viewh);
+		viewportClipRight = clampViewportCoordinate(
+			(long) targetClipX + targetClipWidth - viewx, vieww);
+		viewportClipBottom = clampViewportCoordinate(
+			(long) targetClipY + targetClipHeight - viewy, viewh);
+
+		if (viewportClipRight < viewportClipLeft) { viewportClipRight = viewportClipLeft; }
+		if (viewportClipBottom < viewportClipTop) { viewportClipBottom = viewportClipTop; }
+	}
+
+	private static int clampViewportCoordinate(long coordinate, int dimension)
+	{
+		if (coordinate <= 0) { return 0; }
+		if (coordinate >= dimension) { return dimension; }
+		return (int) coordinate;
+	}
+
+	private void clearDepthBuffer()
+	{
+		if (this.depthBuffer == null || viewportClipLeft >= viewportClipRight ||
+			viewportClipTop >= viewportClipBottom) { return; }
+
+		final int clearWidth = viewportClipRight - viewportClipLeft;
+		final int physicalX = targetOriginX + viewx + viewportClipLeft;
+		for (int y = viewportClipTop; y < viewportClipBottom; y++)
+		{
+			final int rowStart = (targetOriginY + viewy + y) * canvasWidth + physicalX;
+			Arrays.fill(this.depthBuffer, rowStart, rowStart + clearWidth, this.far);
+		}
+	}
+
+	/* Returns the physical color/depth-buffer index for viewport-local coordinates. */
+	private int getTargetIndex(int x, int y)
+	{
+		return (targetOriginY + viewy + y) * canvasWidth + targetOriginX + viewx + x;
+	}
 
 	/*
 	 * Renders a Sprite3D as a screen-aligned textured rectangle, following the same
@@ -1113,10 +1199,10 @@ public class Graphics3D
 		final float spanX = sx1 - sx0, spanY = sy1 - sy0;
 		if (spanX <= 0f || spanY <= 0f) { return; }
 
-		final int pixL = M3GMath.max(M3GMath.roundPositive(sx0), 0);
-		final int pixR = M3GMath.min(M3GMath.roundPositive(sx1), vieww);
-		final int pixT = M3GMath.max(M3GMath.roundPositive(sy0), 0);
-		final int pixB = M3GMath.min(M3GMath.roundPositive(sy1), viewh);
+		final int pixL = M3GMath.max(M3GMath.roundPositive(sx0), viewportClipLeft);
+		final int pixR = M3GMath.min(M3GMath.roundPositive(sx1), viewportClipRight);
+		final int pixT = M3GMath.max(M3GMath.roundPositive(sy0), viewportClipTop);
+		final int pixB = M3GMath.min(M3GMath.roundPositive(sy1), viewportClipBottom);
 		if (pixL >= pixR || pixT >= pixB) { return; }
 
 		final CompositingMode compositingMode = appearance.getCompositingMode() != null ? appearance.getCompositingMode() : new CompositingMode();
@@ -1155,11 +1241,13 @@ public class Graphics3D
 			int texY = isectY + (int) ((flipY ? 1f - v : v) * isectH);
 			if (texY < isectY) { texY = isectY; } else if (texY >= isectY + isectH) { texY = isectY + isectH - 1; }
 
-			int rasterIdxY = (y + viewy) * canvasWidth + viewx;
+			int rasterIdxY = getTargetIndex(0, y);
 			for (int x = pixL; x < pixR; x++)
 			{
-				// Depth test against the same buffer and convention used by triangles.
-				if (depthTest && this.depthBuffer[this.vieww * y + x] < ndcZ) { continue; }
+				final int targetIndex = rasterIdxY + x;
+
+				// Color and depth use the same physical render-target pixel.
+				if (depthTest && this.depthBuffer[targetIndex] < ndcZ) { continue; }
 
 				final float u = (x + 0.5f - sx0) / spanX;
 				int texX = isectX + (int) ((flipX ? 1f - u : u) * isectW);
@@ -1173,13 +1261,14 @@ public class Graphics3D
 				if (fog != null && fogFactor < 255.0f)
 					{ paintPixel = blendPixels(paintPixel, fog.getColor(), (int) fogFactor, Graphics3D.BLEND_FOG, 0, 0); }
 
-				rasterData[rasterIdxY + x] = blendPixels(rasterData[rasterIdxY + x],
-					paintPixel, alpha, compositingMode.getBlending(), 0, 0);;
+				rasterData[targetIndex] = blendPixels(rasterData[targetIndex],
+					paintPixel, alpha, compositingMode.getBlending(), 0, 0);
 
-				// Rendering at half res?
-				if (Mobile.halfResM3GRaster && y+viewy < canvasHeight) { rasterData[rasterIdxY + canvasWidth + x] = rasterData[rasterIdxY + x]; }
+				// Rendering at half res? Repeat only inside the visible viewport.
+				if (Mobile.halfResM3GRaster && y + 1 < viewportClipBottom)
+					{ rasterData[targetIndex + canvasWidth] = rasterData[targetIndex]; }
 
-				if (depthWrite) { this.depthBuffer[this.vieww * y + x] = ndcZ; }
+				if (depthWrite) { this.depthBuffer[targetIndex] = ndcZ; }
 			}
 		}
 	}
@@ -1227,8 +1316,8 @@ public class Graphics3D
 				? xTop + drawY * (xMidR - xTop)
 				: xBot + drawY * (xMidR - xBot);
 
-			int ixL = M3GMath.max(M3GMath.roundPositive(xL), 0);
-			int ixR = M3GMath.min(M3GMath.roundPositive(xR), vieww);
+			int ixL = M3GMath.max(M3GMath.roundPositive(xL), viewportClipLeft);
+			int ixR = M3GMath.min(M3GMath.roundPositive(xR), viewportClipRight);
 
 			final int spanWidth = ixR - ixL;
 
@@ -1281,8 +1370,8 @@ public class Graphics3D
 				? pwTop + drawY * (pwMidR - pwTop)
 				: pwBot + drawY * (pwMidR - pwBot);
 
-			int depthIdx = (y * this.vieww) + ixL;
-			int rasterIdx = ((y + viewy) * canvasWidth + viewx) + ixL;
+			int rasterIdx = getTargetIndex(ixL, y);
+			int depthIdx = rasterIdx;
 
 			final float zStep = (zR - zL) * invDrawSpanWidth;
 			final float pwStep = (pwR - pwL) * invDrawSpanWidth;
@@ -1437,39 +1526,49 @@ public class Graphics3D
 							int distFx = (int) (((ixL + 1.0f) - xL) * 65536.0f);
 							int scaledDist = (distFx * 84) >> 16;
 
-							applyEdgeAA(x - 1, rasterIdx - 1, canvasWidth, paintPixel, rasterData, compBlending, 84 + scaledDist);
-							applyEdgeAA(x - 2, rasterIdx - 2, canvasWidth, paintPixel, rasterData, compBlending, scaledDist);
+							applyEdgeAA(x - 1, rasterIdx - 1, viewportClipLeft, viewportClipRight,
+								canvasWidth, paintPixel, rasterData, compBlending, 84 + scaledDist,
+								y + 1 < viewportClipBottom);
+							applyEdgeAA(x - 2, rasterIdx - 2, viewportClipLeft, viewportClipRight,
+								canvasWidth, paintPixel, rasterData, compBlending, scaledDist,
+								y + 1 < viewportClipBottom);
 						}
 						else
 						{
 							int distFx = (int) ((xR - (ixR - 1)) * 65536.0f);
 							int scaledDist = (distFx * 84) >> 16;
 
-							applyEdgeAA(x + 1, rasterIdx + 1, canvasWidth, paintPixel, rasterData, compBlending, 84 + scaledDist);
-							applyEdgeAA(x + 2, rasterIdx + 2, canvasWidth, paintPixel, rasterData, compBlending, scaledDist);
+							applyEdgeAA(x + 1, rasterIdx + 1, viewportClipLeft, viewportClipRight,
+								canvasWidth, paintPixel, rasterData, compBlending, 84 + scaledDist,
+								y + 1 < viewportClipBottom);
+							applyEdgeAA(x + 2, rasterIdx + 2, viewportClipLeft, viewportClipRight,
+								canvasWidth, paintPixel, rasterData, compBlending, scaledDist,
+								y + 1 < viewportClipBottom);
 						}
 					}
 
 					rasterData[rasterIdx] = blendPixels(rasterData[rasterIdx],
 						paintPixel, (paintPixel >> 24) & 0xFF, compBlending, 0, 0);
 
-					// Rendering at half res? Next scanline gets painted too.
-					if (Mobile.halfResM3GRaster) { rasterData[rasterIdx + canvasWidth] = rasterData[rasterIdx]; }
+					// Rendering at half res? Repeat only inside the visible viewport.
+					if (Mobile.halfResM3GRaster && y + 1 < viewportClipBottom)
+						{ rasterData[rasterIdx + canvasWidth] = rasterData[rasterIdx]; }
 				}
 			}
 		}
 	}
 
-	private static final void applyEdgeAA(int targetX, int targetIdx, int canvasWidth, int paintPixel,
-							int[] rasterData, int compBlending, int coverageAlpha)
+	private static final void applyEdgeAA(int targetX, int targetIdx, int clipLeft, int clipRight,
+			int canvasWidth, int paintPixel, int[] rasterData, int compBlending,
+			int coverageAlpha, boolean repeatScanline)
 	{
-		if (coverageAlpha > 0 && targetX >= 0 && targetX < canvasWidth)
+		if (coverageAlpha > 0 && targetX >= clipLeft && targetX < clipRight)
 		{
 			int aaPixel = blendPixels(rasterData[targetIdx], paintPixel, coverageAlpha, Graphics3D.BLEND_COVERAGE, 0, 0);
 
 			rasterData[targetIdx] = blendPixels(rasterData[targetIdx], aaPixel, (aaPixel >> 24) & 0xFF, compBlending, 0, 0);
 
-			if (Mobile.halfResM3GRaster && (targetIdx + canvasWidth) < rasterData.length)
+			if (Mobile.halfResM3GRaster && repeatScanline)
 			{
 				rasterData[targetIdx + canvasWidth] = rasterData[targetIdx];
 			}
