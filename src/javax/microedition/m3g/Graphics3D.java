@@ -235,9 +235,9 @@ public class Graphics3D
 		{
 			Image2D i2d = (Image2D) target;
 
-			/* JSR-184 specifies that Image2D render targets can only have RGB or RGBA format. */
-			if (i2d.getFormat() != Image2D.RGB && i2d.getFormat() != Image2D.RGBA)
-			{ throw new IllegalArgumentException("Received a 2D render target with invalid internal format"); }
+			/* JSR-184 specifies that Image2D render targets must be mutable RGB or RGBA images. */
+			if (!i2d.isMutable() || (i2d.getFormat() != Image2D.RGB && i2d.getFormat() != Image2D.RGBA))
+				{ throw new IllegalArgumentException("Image2D render target must be mutable RGB or RGBA"); }
 
 			canvasWidth = i2d.getWidth();
 			canvasHeight = i2d.getHeight();
@@ -251,6 +251,10 @@ public class Graphics3D
 			this.viewy = 0;
 			this.vieww = canvasWidth;
 			this.viewh = canvasHeight;
+
+			// Preserve the target unless OVERWRITE explicitly permits discarding it.
+			rasterData = new int[canvasWidth * canvasHeight];
+			if ((hints & OVERWRITE) == 0) { i2d.getPixels(rasterData); }
 		}
 		else if (target instanceof Graphics)
 		{
@@ -325,81 +329,22 @@ public class Graphics3D
 
 		if (clearColor)
 		{
-			if (this.target instanceof Image2D)
+			if (this.target instanceof Image2D && background != null &&
+				background.getImage() != null &&
+				background.getImage().getFormat() != ((Image2D) this.target).getFormat())
 			{
-				Mobile.log(Mobile.LOG_WARNING, Graphics3D.class.getPackage().getName() + "." + Graphics3D.class.getSimpleName() + ": " + "Clear to Image2D not Implemented");
-				Image2D i2d = (Image2D) this.target;
-
-				// CHECK is the bg image used only if clearColor is true?
-
-				if (background.getImage() == null || background.getImage().getFormat() != i2d.getFormat())
-				{ throw new IllegalArgumentException("The background image to be cleared does not have the same format as the render target."); }
-
-				// TODO support clearing Image2D
+				throw new IllegalArgumentException("Background image format differs from Image2D target");
 			}
-			else if (this.target instanceof Graphics)
+
+			/*
+			 * JSR-184 states that clear affects the complete viewport for either
+			 * supported target type. Both targets share this ARGB software buffer.
+			 */
+			for (int py = viewportClipTop; py < viewportClipBottom; py++)
 			{
-				Graphics grp = (Graphics) this.target;
-
-				/*
-				 * As per JSR-184, clear() always affects the whole viewport: fill it with the
-				 * background color first. The Background crop rectangle is a sampling window
-				 * into the background image, NOT the destination rectangle.
-				 */
-				grp.setColor(color);
-				grp.fillRect(viewx, viewy, vieww, viewh);
-
-				// Draw the background's image if any (and there's a background)
-				if(background != null && background.getImage() != null && false)
-				{
-					final Image2D bgImg = background.getImage();
-
-					/* The crop rectangle (defaulting to the whole image) is mapped onto the
-					 * viewport so that it fills it completely; the image mode governs sampling
-					 * outside the image bounds (BORDER = background color, REPEAT = tile). */
-					final int cropX = background.getCropX(), cropY = background.getCropY();
-					int cropW = background.getCropWidth(), cropH = background.getCropHeight();
-					if (cropW <= 0) { cropW = bgImg.getWidth(); }
-					if (cropH <= 0) { cropH = bgImg.getHeight(); }
-					final boolean repeatX = background.getImageModeX() == Background.REPEAT;
-					final boolean repeatY = background.getImageModeY() == Background.REPEAT;
-
-					for (int py = viewportClipTop; py < viewportClipBottom; py++)
-					{
-						int sy = cropY + (int) (py * cropH / viewh);
-						sy = wrapY(sy, bgImg.getHeight(), repeatY, bgImg.isPowerOfTwo(bgImg.getHeight()));
-
-						for (int px = viewportClipLeft; px < viewportClipRight; px++)
-						{
-							int sx = cropX + (int) (px * cropW / vieww);
-							sx = wrapY(sx, bgImg.getWidth(), repeatX, bgImg.isPowerOfTwo(bgImg.getWidth()));
-
-							int paintPixel = bgImg.getPixel(sx, sy);
-
-							// Dither available? Apply it to the BG Image.
-							if ((this.hints & DITHER) != 0)
-							{
-								int ditherOffset = BAYER_PATTERN[((sy & 3) << 2) | (sx & 3)];
-
-								int a = (paintPixel >>> 24) & 0xFF;
-								int r = (paintPixel >> 16) & 0xFF;
-								int g = (paintPixel >> 8) & 0xFF;
-								int b = paintPixel & 0xFF;
-
-								r = ditherChannel(r, ditherOffset);
-								g = ditherChannel(g, ditherOffset);
-								b = ditherChannel(b, ditherOffset);
-
-								paintPixel = (a << 24) | (r << 16) | (g << 8) | b;
-							}
-
-							// Image format argument shouldn't matter here
-							final int targetIndex = getTargetIndex(px, py);
-							rasterData[targetIndex] = blendPixels(rasterData[targetIndex], paintPixel,
-								(paintPixel >> 24) & 0xFF, CompositingMode.ALPHA, 0, 0);
-						}
-					}
-				}
+				int targetIndex = getTargetIndex(viewportClipLeft, py);
+				for (int px = viewportClipLeft; px < viewportClipRight; px++)
+					{ rasterData[targetIndex++] = color; }
 			}
 		}
 
@@ -482,7 +427,11 @@ public class Graphics3D
 		/* Ignore the call if no render target is bound. */
 		if(this.target != null)
 		{
-			/* If there is a render target, release it */
+			/*
+			 * JSR-184 states that releaseTarget flushes pending rendering. Copy the
+			 * software framebuffer back to a mutable Image2D before unbinding it.
+			 */
+			if (this.target instanceof Image2D) { ((Image2D) this.target).setPixels(rasterData); }
 			this.target = null;
 		}
 	}
@@ -837,16 +786,9 @@ public class Graphics3D
 		 */
 		final int alphaThreshold = (int) Math.ceil(compositingMode.getAlphaThreshold() * 255.0f);
 
-		if (this.target instanceof Image2D)
+		if (this.target instanceof Image2D || this.target instanceof Graphics)
 		{
-			Mobile.log(Mobile.LOG_WARNING, Graphics3D.class.getPackage().getName() + "." + Graphics3D.class.getSimpleName() + ": " + "Render Target is instance of Image2D!");
-			Image2D i2d = (Image2D) this.target;
-			// TODO support rendering to Image2D
-		}
-		else if (this.target instanceof Graphics)
-		{
-			final Graphics pgrp = (Graphics) this.target;
-
+			/* Both target types render into rasterData; Image2D is flushed on releaseTarget. */
 			for (int tri_id = 0; tri_id < renderableTriangles[0]; tri_id++)
 			{
 				// Collect vertex attributes
@@ -1163,7 +1105,6 @@ public class Graphics3D
 
 		// As per JSR-184, a Sprite3D with no appearance (or no image) is not rendered.
 		if (img == null || appearance == null) { return; }
-		if (!(this.target instanceof Graphics)) { return; }
 
 		// JSR-184 scope culling, same rule as for meshes.
 		if ((sprite.getScope() & this.currCam.getScope()) == 0) { return; }

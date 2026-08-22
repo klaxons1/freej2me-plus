@@ -229,6 +229,36 @@ public class Image2D extends Object3D
 		}
 	}
 
+	/* Package-private render-target bridge used while an Image2D is bound. */
+	void getPixels(int[] argb)
+	{
+		if (argb.length < this.width * this.height) { throw new IllegalArgumentException(); }
+		for (int y = 0; y < this.height; y++)
+		{
+			for (int x = 0; x < this.width; x++) { argb[y * this.width + x] = getPixel(x, y); }
+		}
+	}
+
+	void setPixels(int[] argb)
+	{
+		if (!this.mutable) { throw new IllegalStateException("Render target is immutable"); }
+		if (argb.length < this.width * this.height) { throw new IllegalArgumentException(); }
+
+		/*
+		 * JSR-184 states that releaseTarget makes rendering to a mutable RGB or
+		 * RGBA Image2D available through that same image object.
+		 */
+		for (int i = 0; i < this.width * this.height; i++)
+		{
+			final int pixel = argb[i];
+			final int offset = i * this.bpp;
+			this.image[offset] = (byte) (pixel >> 16);
+			this.image[offset + 1] = (byte) (pixel >> 8);
+			this.image[offset + 2] = (byte) pixel;
+			if (this.format == RGBA) { this.image[offset + 3] = (byte) (pixel >>> 24); }
+		}
+	}
+
 	// We do not handle OOB x and y positions here, Graphics3D does that in the clear/render loops
 	int getPixel(int x, int y)
 	{
