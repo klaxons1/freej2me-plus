@@ -329,11 +329,16 @@ public class Graphics3D
 
 		if (clearColor)
 		{
-			if (this.target instanceof Image2D && background != null &&
-				background.getImage() != null &&
-				background.getImage().getFormat() != ((Image2D) this.target).getFormat())
+			if (background != null && background.getImage() != null)
 			{
-				throw new IllegalArgumentException("Background image format differs from Image2D target");
+				final int imageFormat = background.getImage().getFormat();
+				if ((this.target instanceof Image2D &&
+					imageFormat != ((Image2D) this.target).getFormat()) ||
+					(this.target instanceof Graphics && imageFormat != Image2D.RGB))
+				{
+					// JSR-184 states that background and render-target formats must match.
+					throw new IllegalArgumentException("Background image format differs from target");
+				}
 			}
 
 			/*
@@ -345,6 +350,54 @@ public class Graphics3D
 				int targetIndex = getTargetIndex(viewportClipLeft, py);
 				for (int px = viewportClipLeft; px < viewportClipRight; px++)
 					{ rasterData[targetIndex++] = color; }
+			}
+
+			final Image2D bgImage = (background != null) ? background.getImage() : null;
+			final int cropW = (background != null) ? background.getCropWidth() : 0;
+			final int cropH = (background != null) ? background.getCropHeight() : 0;
+			if (bgImage != null && cropW > 0 && cropH > 0)
+			{
+				/*
+				 * JSR-184 states that the crop rectangle is scaled over the complete
+				 * viewport. Pixels outside the image use background color in BORDER
+				 * mode and modulo-wrapped source pixels in REPEAT mode.
+				 */
+				final boolean repeatX = background.getImageModeX() == Background.REPEAT;
+				final boolean repeatY = background.getImageModeY() == Background.REPEAT;
+				final int imageW = bgImage.getWidth(), imageH = bgImage.getHeight();
+				for (int py = viewportClipTop; py < viewportClipBottom; py++)
+				{
+					final int viewportY = py - viewy;
+					int sy = background.getCropY() +
+						(int) (((long) (2 * viewportY + 1) * cropH) / (2L * viewh));
+					final boolean borderY = !repeatY && (sy < 0 || sy >= imageH);
+					if (repeatY) { sy = wrapY(sy, imageH, true, Image2D.isPowerOfTwo(imageH)); }
+
+					int targetIndex = getTargetIndex(viewportClipLeft, py);
+					for (int px = viewportClipLeft; px < viewportClipRight; px++)
+					{
+						final int viewportX = px - viewx;
+						int sx = background.getCropX() +
+							(int) (((long) (2 * viewportX + 1) * cropW) / (2L * vieww));
+						final boolean borderX = !repeatX && (sx < 0 || sx >= imageW);
+						if (repeatX) { sx = wrapX(sx, imageW, true, Image2D.isPowerOfTwo(imageW)); }
+
+						if (!borderX && !borderY)
+						{
+							int pixel = bgImage.getPixel(sx, sy);
+							if ((this.hints & DITHER) != 0)
+							{
+								final int offset = BAYER_PATTERN[((py & 3) << 2) | (px & 3)];
+								pixel = (pixel & 0xFF000000) |
+									(ditherChannel((pixel >> 16) & 0xFF, offset) << 16) |
+									(ditherChannel((pixel >> 8) & 0xFF, offset) << 8) |
+									ditherChannel(pixel & 0xFF, offset);
+							}
+							rasterData[targetIndex] = pixel;
+						}
+						targetIndex++;
+					}
+				}
 			}
 		}
 
