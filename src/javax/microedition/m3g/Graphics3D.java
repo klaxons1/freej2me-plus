@@ -1483,6 +1483,13 @@ public class Graphics3D
 		return val < 0 ? 0 : (val > 255 ? 255 : val);
 	}
 
+	/* Multiplies two normalized 8-bit components, rounded to the nearest value. */
+	private static final int multiply255(int a, int b)
+	{
+		int product = a * b + 128;
+		return (product + (product >> 8)) >> 8;
+	}
+
 	// This one is used for texture/background blending, and also pixel blending when rendering to the screen
 	private static final int blendPixels(int bg, int fg, int alpha, int blendMode, int texBlendColor, int texFormat)
 	{
@@ -1633,13 +1640,19 @@ public class Graphics3D
 				int fR = (bg >> 16) & 0xFF, fG = (bg >> 8) & 0xFF, fB = bg & 0xFF, fA = bg >>> 24;
 				int tR = (fg >> 16) & 0xFF, tG = (fg >> 8) & 0xFF, tB = fg & 0xFF, tA = fg >>> 24;
 
-				int outR = (texFormat == Image2D.ALPHA) ? fR : (fR * tR) >> 8;
-				int outG = (texFormat == Image2D.ALPHA) ? fG : (fG * tG) >> 8;
-				int outB = (texFormat == Image2D.ALPHA) ? fB : (fB * tB) >> 8;
+				/*
+				 * Texture components are normalized to [0, 1], so their 8-bit product
+				 * must be divided by 255, not 256. Using >> 8 made 255 * 255 become
+				 * 254. In particular, an opaque RGBA texture then failed an alpha test
+				 * whose threshold was 1.0, making the whole mesh invisible.
+				 */
+				int outR = (texFormat == Image2D.ALPHA) ? fR : multiply255(fR, tR);
+				int outG = (texFormat == Image2D.ALPHA) ? fG : multiply255(fG, tG);
+				int outB = (texFormat == Image2D.ALPHA) ? fB : multiply255(fB, tB);
 
 				boolean hasAlpha = (texFormat == Image2D.ALPHA ||
 					texFormat == Image2D.LUMINANCE_ALPHA || texFormat == Image2D.RGBA);
-				int outA = hasAlpha ? (fA * tA) >> 8 : fA;
+				int outA = hasAlpha ? multiply255(fA, tA) : fA;
 
 				return (outA << 24) | (outR << 16) | (outG << 8) | outB;
 			}
