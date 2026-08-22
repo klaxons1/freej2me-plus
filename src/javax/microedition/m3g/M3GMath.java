@@ -82,14 +82,18 @@ public class M3GMath
 
 	public static double exp(double val)
 	{
-		final long tmp = (long) (1512775 * val + (1072693248 - 60801));
-		return Double.longBitsToDouble(tmp << 32);
+		// JSR-184 defines exponential fog with the mathematical e^x function.
+		return Math.exp(val);
 	}
 
 	public static float exp(float val)
 	{
-		final int tmp = (int) (1512775 * val + (1072693248 - 60801));
-		return Float.intBitsToFloat(tmp << 32);
+		/*
+		 * JSR-184 states that EXPONENTIAL fog uses exp(-density * distance).
+		 * The old bit approximation shifted an int by 32 (a no-op in Java) and
+		 * even returned values greater than one for negative arguments.
+		 */
+		return (float) Math.exp(val);
 	}
 
 	public static int round(float value)
