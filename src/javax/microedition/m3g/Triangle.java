@@ -73,9 +73,9 @@ class Triangle
 		float[] eyePos, VertexArray vertNorms, Transform normalMatrix,
 		// Lights
 		ArrayList<Light> lights, float[] lightEyePos, float[] lightEyeDir,
-		// IndexArray, clipping, scope, winding order and perspectiveCorrection
+		// IndexArray, clipping, scope, effective alpha, winding and perspective correction
 		int[] tris, int[] renderableTriangles, int cullingMode, VertexBuffer vertices, int scope,
-		boolean polygonClockwise, boolean perspectiveCorrect)
+		float alphaFactor, boolean polygonClockwise, boolean perspectiveCorrect)
 	{
 		renderableTriangles[0] = 0;
 		final int totalTris = tris.length / 3;
@@ -159,6 +159,20 @@ class Triangle
 			}
 
 			/*
+			 * JSR-184 states that effective Node alpha multiplies Material diffuse
+			 * alpha, or the VertexBuffer/default color alpha when no Material exists.
+			 * Applying it after lighting covers vertex-color tracking as well.
+			 */
+			if (alphaFactor != 1.0f)
+			{
+				for (int i = 0; i < 3; i++)
+				{
+					final int alpha = (int) ((Triangle.inC[i] >>> 24) * alphaFactor);
+					Triangle.inC[i] = (alpha << 24) | (Triangle.inC[i] & 0x00FFFFFF);
+				}
+			}
+
+			/*
 			 * Clip against the homogeneous near plane (z >= -w), interpolating
 			 * positions, texture coordinates and vertex colors before perspective division.
 			 */
@@ -181,7 +195,7 @@ class Triangle
 				if (cullTriangle) { continue; }
 
 				tri.setTexCoords(Triangle.outT, fan);
-				boolean hasColors = hasLighting || (vertices.getColors() != null);
+				boolean hasColors = hasLighting || (vertices.getColors() != null) || alphaFactor != 1.0f;
 				tri.setVertexColors(hasColors ? Triangle.outC : null, fan);
 
 				tri.project(perspectiveCorrect);

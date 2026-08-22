@@ -514,6 +514,11 @@ public class Graphics3D
 
 	public void render(Node node, Transform transform)
 	{
+		renderNode(node, transform, 1.0f);
+	}
+
+	private void renderNode(Node node, Transform transform, float parentAlpha)
+	{
 		/* As per JSR-184, throw NullPointerException if no node is received. */
 		if(node == null) { throw new NullPointerException("render() was called but no node was provided."); }
 
@@ -526,6 +531,13 @@ public class Graphics3D
 		// Node not renderable? Skip it and its children.
 		if(!node.isRenderingEnabled()) { return; }
 
+		/*
+		 * JSR-184 states that effective alpha is the product of a Node's alpha
+		 * factor and all ancestor factors. Public render starts at one because
+		 * ancestors of the explicitly supplied node are ignored.
+		 */
+		final float effectiveAlpha = parentAlpha * node.getAlphaFactor();
+
 		if (node instanceof Mesh)
 		{
 			Mesh mesh = (Mesh) node;
@@ -533,10 +545,11 @@ public class Graphics3D
 			VertexBuffer vertices = mesh.getVertexBuffer();
 			for (int i = 0; i < subMeshes; i++)
 			{
-				if (mesh.getAppearance(i) != null) { render(vertices, mesh.getIndexBuffer(i), mesh.getAppearance(i), transform, node.getScope()); }
+				if (mesh.getAppearance(i) != null)
+					{ renderSubmesh(vertices, mesh.getIndexBuffer(i), mesh.getAppearance(i), transform, node.getScope(), effectiveAlpha); }
 			}
 		}
-		else if (node instanceof Sprite3D) { renderSprite((Sprite3D) node, transform); }
+		else if (node instanceof Sprite3D) { renderSprite((Sprite3D) node, transform, effectiveAlpha); }
 		else if (node instanceof Group)
 		{
 			Node child = ((Group) node).firstChild;
@@ -550,7 +563,7 @@ public class Graphics3D
 						child.getCompositeTransform(nodetr);
 						if(transform != null) { nodetr.preMultiply(transform); }
 
-						render(child, nodetr);
+						renderNode(child, nodetr, effectiveAlpha);
 					}
 					child = child.right;
 				} while (child != ((Group) node).firstChild);
@@ -562,6 +575,12 @@ public class Graphics3D
 	{ this.render(vertices, triangles, appearance, transform, -1); }
 
 	public void render(VertexBuffer vertices, IndexBuffer triangles, Appearance appearance, Transform transform, int scope)
+	{
+		renderSubmesh(vertices, triangles, appearance, transform, scope, 1.0f);
+	}
+
+	private void renderSubmesh(VertexBuffer vertices, IndexBuffer triangles, Appearance appearance,
+		Transform transform, int scope, float alphaFactor)
 	{
 		/* As per JSR-184, if vertices, triangles or appearence are null, throw a NullPointerException. */
 		if (vertices == null || triangles == null || appearance == null) { throw new NullPointerException("Tried to render a submesh with incomplete info."); }
@@ -779,8 +798,8 @@ public class Graphics3D
 			eyePos, vertNorms, normalMatrix,
 			// Lights
 			this.currLights, lightEyePos, lightEyeDir,
-			// IndexArray, clipping, scope, winding order and perspectiveCorrection
-			triangles.getIndexArray(), renderableTriangles, cullingMode, vertices, scope,
+			// IndexArray, clipping, scope, effective alpha, winding and perspective correction
+			triangles.getIndexArray(), renderableTriangles, cullingMode, vertices, scope, alphaFactor,
 			windingOrder == PolygonMode.WINDING_CW, perspectiveCorrection);
 
 		// At this point the triangles in `trisScreen` are actually
@@ -1137,7 +1156,7 @@ public class Graphics3D
 	 * to the screen axes, projected, and the resulting NDC quad is rasterized directly
 	 * with the sprite's crop as texture source.
 	 */
-	private void renderSprite(Sprite3D sprite, Transform transform)
+	private void renderSprite(Sprite3D sprite, Transform transform, float alphaFactor)
 	{
 		final Image2D img = sprite.getImage();
 		final Appearance appearance = sprite.getAppearance();
@@ -1225,7 +1244,6 @@ public class Graphics3D
 		final Fog fog = appearance.getFog();
 		// JSR-184 uses alpha >= threshold; threshold zero must accept alpha zero.
 		final int alphaThreshold = (int) Math.ceil(compositingMode.getAlphaThreshold() * 255.0f);
-		final float alphaFactor = sprite.getAlphaFactor();
 		final boolean depthTest = compositingMode.isDepthTestEnabled() && isDepthBufferEnabled();
 		final boolean depthWrite = depthTest && compositingMode.isDepthWriteEnabled();
 
