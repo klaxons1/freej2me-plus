@@ -1217,24 +1217,25 @@ public class Graphics3D
 		final boolean depthTest = compositingMode.isDepthTestEnabled() && isDepthBufferEnabled();
 		final boolean depthWrite = depthTest && compositingMode.isDepthWriteEnabled();
 
-		// The Sprite3D has the same depth for its entire area, so we only need
-		// to calculate fog once.
+		// The Sprite3D has the same depth for its entire area, so calculate fog once.
+		int spriteFogFactor = 255;
 		if (fog != null)
 		{
-			// Distance in eye space along the camera's viewing axis
+			// JSR-184 states that fog distance is the positive eye-space viewing distance.
 			final float zEye = -oz;
-
-			float fogFactor;
+			float visibility;
 			if (fog.getMode() == Fog.LINEAR)
 			{
-				fogFactor = (fog.getFarDistance() - zEye) / (fog.getFarDistance() - fog.getNearDistance());
+				visibility = (fog.getFarDistance() - zEye) /
+					(fog.getFarDistance() - fog.getNearDistance());
 			}
 			else
 			{
-				fogFactor = M3GMath.exp(-fog.getDensity() * zEye);
+				visibility = M3GMath.exp(-fog.getDensity() * zEye);
 			}
 
-			fogFactor = M3GMath.max(0.0f, M3GMath.min(255.0f, fogFactor * 256.0f));
+			visibility = M3GMath.max(0.0f, M3GMath.min(1.0f, visibility));
+			spriteFogFactor = (int) (visibility * 255.0f);
 		}
 
 		for (int y = pixT; y < pixB; y++)
@@ -1263,8 +1264,8 @@ public class Graphics3D
 
 				if (alpha < alphaThreshold) { continue; }
 
-				if (fog != null && fogFactor < 255.0f)
-					{ paintPixel = blendPixels(paintPixel, fog.getColor(), (int) fogFactor, Graphics3D.BLEND_FOG, 0, 0); }
+				if (fog != null && spriteFogFactor < 255)
+					{ paintPixel = blendPixels(paintPixel, fog.getColor(), spriteFogFactor, Graphics3D.BLEND_FOG, 0, 0); }
 
 				rasterData[targetIndex] = blendPixels(rasterData[targetIndex],
 					paintPixel, alpha, compositingMode.getBlending(), 0, 0);
