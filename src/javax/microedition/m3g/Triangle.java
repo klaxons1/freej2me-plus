@@ -204,7 +204,8 @@ class Triangle
 	private static final void normalize3(float[] vector)
 	{
 		final float length = length3(vector[0], vector[1], vector[2]);
-		if (length > M3GMath.EPSILON)
+		// JSR-184 states that every non-zero normal is normalized before lighting.
+		if (length > 0.0f)
 		{
 			vector[0] /= length;
 			vector[1] /= length;
@@ -323,7 +324,7 @@ class Triangle
 				viewY = -V_EYE[1];
 				viewZ = -V_EYE[2];
 				float viewLen = length3(viewX, viewY, viewZ);
-				if (viewLen > M3GMath.EPSILON) { viewX /= viewLen; viewY /= viewLen; viewZ /= viewLen; }
+				if (viewLen > 0.0f) { viewX /= viewLen; viewY /= viewLen; viewZ /= viewLen; }
 			}
 			else
 			{
@@ -370,7 +371,7 @@ class Triangle
 					lightDirZ = -lightEyeDir[l * 4 + 2];
 
 					float lLen = length3(lightDirX, lightDirY, lightDirZ);
-					if (lLen > M3GMath.EPSILON) { lightDirX /= lLen; lightDirY /= lLen; lightDirZ /= lLen; }
+					if (lLen > 0.0f) { lightDirX /= lLen; lightDirY /= lLen; lightDirZ /= lLen; }
 				}
 				else
 				{
@@ -380,7 +381,7 @@ class Triangle
 					float lz = lightEyePos[l * 4 + 2] - V_EYE[2];
 					float dist = length3(lx, ly, lz);
 
-					if (dist > M3GMath.EPSILON) { lightDirX = lx / dist; lightDirY = ly / dist; lightDirZ = lz / dist; }
+					if (dist > 0.0f) { lightDirX = lx / dist; lightDirY = ly / dist; lightDirZ = lz / dist; }
 					else { lightDirX = 0; lightDirY = 0; lightDirZ = 1; }
 
 					attenuation = 1.0f / (light.getConstantAttenuation() +
@@ -394,7 +395,7 @@ class Triangle
 						float sdY = lightEyeDir[l * 4 + 1];
 						float sdZ = lightEyeDir[l * 4 + 2];
 						final float sdLen = length3(sdX, sdY, sdZ);
-						if (sdLen > M3GMath.EPSILON) { sdX /= sdLen; sdY /= sdLen; sdZ /= sdLen; }
+						if (sdLen > 0.0f) { sdX /= sdLen; sdY /= sdLen; sdZ /= sdLen; }
 
 						// lightDir points vertex -> light; the cone test needs light -> vertex.
 						float spotDot = M3GMath.min(1.0f,
@@ -429,7 +430,7 @@ class Triangle
 					float hX = lightDirX + viewX, hY = lightDirY + viewY, hZ = lightDirZ + viewZ;
 					float hLen = length3(hX, hY, hZ);
 
-					if (hLen > M3GMath.EPSILON)
+					if (hLen > 0.0f)
 					{
 						hX /= hLen; hY /= hLen; hZ /= hLen;
 						float nDotH = M3GMath.min(1.0f,
