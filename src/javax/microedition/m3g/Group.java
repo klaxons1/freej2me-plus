@@ -586,9 +586,14 @@ public class Group extends Node
 		double height = Math.sqrt((xref - ox) * (xref - ox) + (yref - oy) * (yref - oy) + (zref - oz) * (zref - oz));
 		if (!isFinite(width) || !isFinite(height) || width == 0.0 || height == 0.0) { return; }
 
-		float[] spriteClip = { (float) ox, (float) oy, (float) oz, 1.0f,
-			(float) (ox + width), (float) oy, (float) oz, 1.0f,
-			(float) ox, (float) (oy + height), (float) oz, 1.0f };
+		/* Keep the original homogeneous origin for the projection step. The
+		 * reference-axis distances were calculated after normalizing to W=1,
+		 * but the Sprite3D formula projects o' itself and adds the distances as
+		 * vectors (with W=0). This distinction matters for a non-affine modelview
+		 * transform. */
+		float[] spriteClip = { eyePoints[0], eyePoints[1], eyePoints[2], eyePoints[3],
+			eyePoints[0] + (float) width, eyePoints[1], eyePoints[2], eyePoints[3],
+			eyePoints[0], eyePoints[1] + (float) height, eyePoints[2], eyePoints[3] };
 		projection.transform(spriteClip);
 		if (!hasPositiveW(spriteClip[3]) || !hasPositiveW(spriteClip[7]) || !hasPositiveW(spriteClip[11])) { return; }
 
