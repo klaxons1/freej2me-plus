@@ -113,6 +113,7 @@ public class SkinnedMesh extends Mesh
 		Transform bindPose = new Transform();
 		if (bone.getTransformTo(this, bindPose))
 		{
+			bindPose.invert();
 			data.initialTransform.set(bindPose);
 		}
 		else { data.initialTransform.setIdentity(); }
