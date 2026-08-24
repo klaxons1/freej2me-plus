@@ -37,9 +37,6 @@ public class World extends Group
 			if (child instanceof Camera && copy.camera == null) {
 				copy.camera = (Camera) child;
 				copy.addReference(copy.camera);
-			} else if (child instanceof Background && copy.background == null) {
-				copy.background = (Background) child;
-				copy.addReference(copy.background);
 			}
 		}
 		return copy;
