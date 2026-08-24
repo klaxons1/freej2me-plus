@@ -110,6 +110,13 @@ public class SkinnedMesh extends Mesh
 
 		BoneData data = new BoneData(bone, weight, firstVertex, numVertices);
 
+		Transform bindPose = new Transform();
+		if (bone.getTransformTo(this, bindPose))
+		{
+			data.initialTransform.set(bindPose);
+		}
+		else { data.initialTransform.setIdentity(); }
+
 		this.dirtyBits[1] = true;
 		this.initBindSet = false;
 		bones.add(data);
@@ -235,18 +242,6 @@ public class SkinnedMesh extends Mesh
 
 	private void initBindPoses()
 	{
-		if (this.initBindSet) { return; }
-
-		Transform boneToMesh = new Transform();
-		for (int i = 0; i < bones.size(); i++)
-		{
-			BoneData bd = (BoneData) bones.get(i);
-			if (bd.bone.getTransformTo(this, boneToMesh))
-            {
-                bd.initialTransform.set(boneToMesh);
-            }
-            else { bd.initialTransform.setIdentity(); }
-		}
 		this.initBindSet = true;
 	}
 
