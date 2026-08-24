@@ -67,11 +67,15 @@ public class VertexBuffer extends Object3D
 
 		copy.fixed = this.fixed;
 		copy.length = this.length;
-		copy.positions = this.positions;
-        copy.normals = this.normals;
-        copy.colors = this.colors;
+		copy.positions = (this.positions != null) ? (VertexArray) this.positions.duplicate() : null;
+        copy.normals = (this.normals != null) ? (VertexArray) this.normals.duplicate() : null;
+        copy.colors = (this.colors != null) ? (VertexArray) this.colors.duplicate() : null;
 
-		copy.texCoords = (VertexArray[]) this.texCoords.clone();
+		copy.texCoords = new VertexArray[this.texCoords.length];
+		for (int i = 0; i < this.texCoords.length; i++)
+		{
+			copy.texCoords[i] = (this.texCoords[i] != null) ? (VertexArray) this.texCoords[i].duplicate() : null;
+		}
 		copy.positionBias = (float[]) this.positionBias.clone();
 		copy.texCoordBias = new float[this.texCoordBias.length][];
 		copy.texCoordScale = (float[]) this.texCoordScale.clone();
