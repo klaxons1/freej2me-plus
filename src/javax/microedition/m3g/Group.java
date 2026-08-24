@@ -333,14 +333,19 @@ public class Group extends Node
 
 		int vertexCount = positions.getVertexCount();
 		float[] rawPositions = readVertexArray(positions);
+		float[] localPositions = new float[vertexCount * 3];
 		float[] transformedPositions = new float[vertexCount * 4];
 		for (int vertex = 0; vertex < vertexCount; vertex++)
 		{
 			int source = vertex * 3;
+			int local = vertex * 3;
 			int target = vertex * 4;
-			transformedPositions[target] = rawPositions[source] * positionScaleBias[0] + positionScaleBias[1];
-			transformedPositions[target + 1] = rawPositions[source + 1] * positionScaleBias[0] + positionScaleBias[2];
-			transformedPositions[target + 2] = rawPositions[source + 2] * positionScaleBias[0] + positionScaleBias[3];
+			localPositions[local] = rawPositions[source] * positionScaleBias[0] + positionScaleBias[1];
+			localPositions[local + 1] = rawPositions[source + 1] * positionScaleBias[0] + positionScaleBias[2];
+			localPositions[local + 2] = rawPositions[source + 2] * positionScaleBias[0] + positionScaleBias[3];
+			transformedPositions[target] = localPositions[local];
+			transformedPositions[target + 1] = localPositions[local + 1];
+			transformedPositions[target + 2] = localPositions[local + 2];
 			transformedPositions[target + 3] = 1.0f;
 		}
 		meshToGroup.transform(transformedPositions);
@@ -392,7 +397,7 @@ public class Group extends Node
 					{ throw new IllegalStateException("Triangle index exceeds VertexBuffer"); }
 
 				intersectTriangle(mesh, vertices, appearance, submesh, winding, culling,
-					groupRay, groupPositions, normalValues, ia, ib, ic, result);
+					groupRay, groupPositions, localPositions, normalValues, ia, ib, ic, result);
 			}
 		}
 	}
@@ -404,7 +409,7 @@ public class Group extends Node
 	 */
 	private static void intersectTriangle(Mesh mesh, VertexBuffer vertices, Appearance appearance,
 		int submesh, int winding, int culling, float[] ray, float[] positions,
-		float[] normalValues, int ia, int ib, int ic, PickResult result)
+		float[] localPositions, float[] normalValues, int ia, int ib, int ic, PickResult result)
 	{
 		int a = 3 * ia;
 		int b = 3 * ib;
@@ -456,28 +461,40 @@ public class Group extends Node
 		result.node = mesh;
 		result.distance = distance;
 		result.submesh = submesh;
-		computeNormal(normalValues, ia, ib, ic, weightA, weightB, weightC, result.normal);
+		computeNormal(normalValues, localPositions, ia, ib, ic, weightA, weightB, weightC, result.normal);
 		computeTextureCoordinates(vertices, appearance, ia, ib, ic, weightA, weightB, weightC,
 			result.texS, result.texT);
 	}
 
-	private static void computeNormal(float[] normalValues, int ia, int ib, int ic,
+	private static void computeNormal(float[] normalValues, float[] localPositions, int ia, int ib, int ic,
 		float weightA, float weightB, float weightC, float[] normal)
 	{
-		/* The normal is undefined for a Mesh without vertex normals. Keep a
-		 * deterministic unit value rather than deriving a face normal that the
-		 * API does not promise to return. */
-		if (normalValues == null)
+		double nx, ny, nz;
+		if (normalValues != null)
 		{
-			normal[0] = 0.0f;
-			normal[1] = 0.0f;
-			normal[2] = 1.0f;
-			return;
+			nx = weightA * normalValues[3 * ia] + weightB * normalValues[3 * ib] + weightC * normalValues[3 * ic];
+			ny = weightA * normalValues[3 * ia + 1] + weightB * normalValues[3 * ib + 1] + weightC * normalValues[3 * ic + 1];
+			nz = weightA * normalValues[3 * ia + 2] + weightB * normalValues[3 * ib + 2] + weightC * normalValues[3 * ic + 2];
+		}
+		else
+		{
+			/* Mesh normals are technically undefined without vertex normals. A
+			 * geometric fallback is nevertheless useful and stays in the required
+			 * Mesh-local coordinate system, unlike the Group-space intersection data. */
+			int a = 3 * ia;
+			int b = 3 * ib;
+			int c = 3 * ic;
+			double e1x = localPositions[b] - localPositions[a];
+			double e1y = localPositions[b + 1] - localPositions[a + 1];
+			double e1z = localPositions[b + 2] - localPositions[a + 2];
+			double e2x = localPositions[c] - localPositions[a];
+			double e2y = localPositions[c + 1] - localPositions[a + 1];
+			double e2z = localPositions[c + 2] - localPositions[a + 2];
+			nx = e1y * e2z - e1z * e2y;
+			ny = e1z * e2x - e1x * e2z;
+			nz = e1x * e2y - e1y * e2x;
 		}
 
-		double nx = weightA * normalValues[3 * ia] + weightB * normalValues[3 * ib] + weightC * normalValues[3 * ic];
-		double ny = weightA * normalValues[3 * ia + 1] + weightB * normalValues[3 * ib + 1] + weightC * normalValues[3 * ic + 1];
-		double nz = weightA * normalValues[3 * ia + 2] + weightB * normalValues[3 * ib + 2] + weightC * normalValues[3 * ic + 2];
 		double length = Math.sqrt(nx * nx + ny * ny + nz * nz);
 		if (!isFinite(length) || length == 0.0)
 		{
