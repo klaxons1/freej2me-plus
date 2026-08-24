@@ -244,7 +244,6 @@ public class SkinnedMesh extends Mesh
 			if (bd.bone.getTransformTo(this, boneToMesh))
             {
                 bd.initialTransform.set(boneToMesh);
-                bd.initialTransform.invert();
             }
             else { bd.initialTransform.setIdentity(); }
 		}
@@ -283,7 +282,7 @@ public class SkinnedMesh extends Mesh
                 boneToMesh.setIdentity();
             }
 
-            // 2. Multiply by Mesh -> Bone reference pose (Inverse Bind Pose)
+            // 2. Apply bind pose B_i (mesh rest -> bone rest)
             finalSkinning.set(boneToMesh);
             finalSkinning.postMultiply(data.initialTransform);
             finalSkinning.get(skinningMatrices[b]);
