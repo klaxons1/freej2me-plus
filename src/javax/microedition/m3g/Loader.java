@@ -948,7 +948,16 @@ public class Loader
 		}
 		catch (Exception e)
 		{
-			Mobile.log(Mobile.LOG_ERROR, Loader.class.getPackage().getName() + "." + Loader.class.getSimpleName() + ": " + "Exception: " + e.getMessage());
+			String tag = Loader.class.getPackage().getName() + "." + Loader.class.getSimpleName() + ": ";
+			/* e.getMessage() is often null for NullPointerException. Route the
+			 * exception class and stack trace through Mobile.log as well, since a
+			 * MIDlet's stderr is not necessarily visible to the front end. */
+			Mobile.log(Mobile.LOG_ERROR, tag + "Exception: " + e.toString());
+			StackTraceElement[] trace = e.getStackTrace();
+			for (int i = 0; i < trace.length; i++)
+			{
+				Mobile.log(Mobile.LOG_ERROR, tag + "  at " + trace[i].toString());
+			}
 			e.printStackTrace();
 			throw new IOException("Invalid M3G data.");
 		}
