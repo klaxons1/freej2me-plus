@@ -24,6 +24,27 @@ public class World extends Group
 
 	public World() { }
 
+	@Override
+	protected Object3D duplicateImpl()
+	{
+		World copy = (World) super.duplicateImpl();
+		copy.camera = null;
+		copy.background = null;
+
+		for (int i = 0; i < copy.getChildCount(); i++)
+		{
+			Node child = copy.getChild(i);
+			if (child instanceof Camera && copy.camera == null) {
+				copy.camera = (Camera) child;
+				copy.addReference(copy.camera);
+			} else if (child instanceof Background && copy.background == null) {
+				copy.background = (Background) child;
+				copy.addReference(copy.background);
+			}
+		}
+		return copy;
+	}
+
 	public Camera getActiveCamera() { return camera; }
 
 	public void setActiveCamera(Camera camera)
