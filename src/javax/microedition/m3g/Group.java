@@ -378,11 +378,10 @@ public class Group extends Node
 			IndexBuffer buffer = mesh.getIndexBuffer(submesh);
 			if (buffer == null) { throw new IllegalStateException("Mesh has a null IndexBuffer"); }
 			int indexCount = buffer.getIndexCount();
-			if (indexCount < 0 || (indexCount % 3) != 0)
+			int[] indices = buffer.getIndexArray();
+			if (indexCount < 0 || (indexCount % 3) != 0 ||
+				indices == null || indices.length != indexCount)
 				{ throw new IllegalStateException("Invalid triangle index buffer"); }
-
-			int[] indices = new int[indexCount];
-			buffer.getIndices(indices);
 
 			PolygonMode polygonMode = appearance.getPolygonMode();
 			int culling = polygonMode != null ? polygonMode.getCulling() : PolygonMode.CULL_BACK;
@@ -528,8 +527,9 @@ public class Group extends Node
 			if (coords == null) { continue; }
 
 			int components = coords.getComponentCount();
-			if ((components != 2 && components != 3) || coords.getVertexCount() <= Math.max(ia, Math.max(ib, ic)))
-				{ continue; }
+			if ((components != 2 && components != 3) ||
+				coords.getVertexCount() != vertices.getVertexCount())
+				{ throw new IllegalStateException("Invalid Mesh texture coordinate array"); }
 
 			float[] values = readVertexArray(coords);
 			float[] coordinate = { 0.0f, 0.0f, 0.0f, 1.0f };
