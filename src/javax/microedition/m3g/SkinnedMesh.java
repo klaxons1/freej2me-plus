@@ -75,9 +75,12 @@ public class SkinnedMesh extends Mesh
 		copy.initBindSet = false;
 		copy.addReference(copySkeleton);
 
+		java.util.Hashtable<Node, Node> oldToNew = new java.util.Hashtable<Node, Node>();
+		mapSkeleton(oldToNew, this.skeleton, copySkeleton);
+
 		for (BoneData b : this.bones)
 		{
-			Node clonedBone = findNodeInTree(copySkeleton, b.bone);
+			Node clonedBone = oldToNew.get(b.bone);
 			if (clonedBone != null)
 			{
 				BoneData copyBone = new BoneData(clonedBone, b.weight, b.firstVertex, b.numVertices);
@@ -188,6 +191,21 @@ public class SkinnedMesh extends Mesh
 	{
 		if (skeleton == null) { throw new NullPointerException("Skeleton cannot be null"); }
 		if (skeleton.getParent() != null) { throw new IllegalArgumentException("Skeleton already has a parent"); }
+	}
+
+	private void mapSkeleton(java.util.Hashtable<Node, Node> map, Group oldRoot, Group newRoot)
+	{
+		map.put(oldRoot, newRoot);
+		for (int i = 0; i < oldRoot.getChildCount(); i++)
+		{
+			Node oldChild = oldRoot.getChild(i);
+			Node newChild = newRoot.getChild(i);
+			map.put(oldChild, newChild);
+			if (oldChild instanceof Group && newChild instanceof Group)
+			{
+				mapSkeleton(map, (Group) oldChild, (Group) newChild);
+			}
+		}
 	}
 
 	private static Node findNodeInTree(Node root, Node target)
