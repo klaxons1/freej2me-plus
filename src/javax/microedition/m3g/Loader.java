@@ -881,12 +881,13 @@ public class Loader
 		String authoringField = readString();
 		int checkSum = readInt();
 
-		int read = bytesRead + M3G_FILE_IDENTIFIER.length;
-
-		while (read < totalFileSize)
+		/* Some exporters write an inaccurate totalFileSize into the header. The
+		 * section stream itself is authoritative: only an EOF before the first
+		 * byte of a new section is a clean end of an M3G resource. */
+		while (true)
 		{
-		//while (dis.available() > 0) {
-			compressionScheme = readByte();
+			try { compressionScheme = readByte(); }
+			catch (java.io.EOFException endOfFile) { break; }
 			totalSectionLength = readInt();
 			uncompressedLength = readInt();
 
@@ -913,8 +914,6 @@ public class Loader
 			checkSum = readInt();
 
 			new Loader(uncompressedData, objs, roots, this.resDir, this.activeRefs).loadM3GSectionData();
-
-			read += totalSectionLength;
 		}
 
 		dis.close();
