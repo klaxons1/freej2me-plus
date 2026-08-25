@@ -62,12 +62,18 @@ public abstract class Node extends Transformable
 
 	public final void align(Node reference)
 	{
-		Mobile.log(Mobile.LOG_WARNING, Node.class.getPackage().getName() + "." + Node.class.getSimpleName() + ": " + "Node Alignment requested (untested)");
-		if (reference != null && (this.getRootNode() != reference.getRootNode())) { throw new IllegalArgumentException(); }
-
-		doAlign(reference == null ? this : reference);
+		if (reference != null && this.getRootNode() != reference.getRootNode())
+			{ throw new IllegalArgumentException("Alignment reference is not in the same scene graph"); }
+		if (!doAlign(reference == null ? this : reference))
+			{ throw new IllegalStateException("Unable to resolve node alignment"); }
 	}
 
+	/*
+	 * Alignment is evaluated in coordinate system A.  A differs from this
+	 * node's parent coordinate system only by this node's translation T; its
+	 * rotation, scale and generic transform are deliberately ignored.  This is
+	 * the coordinate system defined by JSR-184 for Node alignment.
+	 */
 	boolean computeAlignment(Node refNode)
 	{
 		if (zTarget == NONE && yTarget == NONE) { return true; }
@@ -76,107 +82,246 @@ public abstract class Node extends Transformable
 		if (zRef != null && (isChildOf(this, zRef) || zRef.getRootNode() != root)) { return false; }
 		if (yRef != null && (isChildOf(this, yRef) || yRef.getRootNode() != root)) { return false; }
 
+		/* Validate dynamic references as well as the fixed references above. */
+		Node zTargetNode = null;
+		Node yTargetNode = null;
 		if (zTarget != NONE)
 		{
-			Node targetNode = (zRef != null) ? zRef : refNode;
-			if (targetNode == this) { return false; }
-			if (!computeAlignmentRotation(new float[]{0, 0, 1}, targetNode, zTarget, NONE)) { return false; }
+			zTargetNode = (zRef != null) ? zRef : refNode;
+			if (zTargetNode == this || isChildOf(this, zTargetNode)) { return false; }
 		}
-
 		if (yTarget != NONE)
 		{
-			Node targetNode = (yRef != null) ? yRef : refNode;
-			if (targetNode == this) { return false; }
-			if (!computeAlignmentRotation(new float[]{0, 1, 0}, targetNode, yTarget, (zTarget != NONE) ? Z_AXIS : NONE)) { return false; }
+			yTargetNode = (yRef != null) ? yRef : refNode;
+			if (yTargetNode == this || isChildOf(this, yTargetNode)) { return false; }
 		}
 
-		return true;
-	}
-
-	private boolean computeAlignmentRotation(float[] srcAxis, Node targetNode, int targetAxisName, int constraint)
-	{
-		if (this.parent == null) return true;
-
-		Transform transform = new Transform();
-		if (!targetNode.getTransformTo(this.parent, transform)) return false;
-
-		float[] transformMatrix = new float[16];
-		float[] orientation = new float[4];
-		float[] targetAxis = new float[4];
-
-		getOrientation(orientation);
+		/* A root has no parent coordinate system in which to align. */
+		if (parent == null) { return true; }
 
 		float[] translation = new float[3];
 		getTranslation(translation);
-		transform.postTranslate(transformMatrix[12], transformMatrix[13], transformMatrix[14]);
-
-		if (constraint != NONE)
+		float[] zVector = null;
+		float[] yVector = null;
+		if (zTargetNode != null)
 		{
-			float[] rot = new float[]{ orientation[0], orientation[1], orientation[2], -orientation[3] };
-			transform.preRotate(rot[0], rot[1], rot[2], rot[3]);
+			zVector = getAlignmentVector(zTargetNode, zTarget, translation);
+			if (zVector == null) { return false; }
+		}
+		if (yTargetNode != null)
+		{
+			yVector = getAlignmentVector(yTargetNode, yTarget, translation);
+			if (yVector == null) { return false; }
 		}
 
-		transform.get(transformMatrix);
-		transformAlignmentTarget(targetAxisName, transformMatrix, targetAxis);
-
-		if (constraint == Z_AXIS)
+		float[] orientation = new float[]{ 0.0f, 0.0f, 0.0f, 1.0f };
+		if (zVector != null)
 		{
-			float norm = targetAxis[0] * targetAxis[0] + targetAxis[1] * targetAxis[1];
-			if (norm < 1.0e-5f) return true;
-			norm = 1.0f / M3GMath.sqrt(norm);
-			targetAxis[0] *= norm;
-			targetAxis[1] *= norm;
-			targetAxis[2] = 0.0f;
-		}
-		else
-		{
-			float norm = targetAxis[0] * targetAxis[0] + targetAxis[1] * targetAxis[1] + targetAxis[2] * targetAxis[2];
-			if (norm > 1.0e-5f)
+			/* First rotate local +Z to the transformed Z alignment target. */
+			if (normalizeAlignmentVector(zVector))
 			{
-				norm = 1.0f / M3GMath.sqrt(norm);
-				targetAxis[0] *= norm;
-				targetAxis[1] *= norm;
-				targetAxis[2] *= norm;
+				orientation = alignmentRotation(new float[]{ 0.0f, 0.0f, 1.0f }, zVector);
+			}
+
+			if (yVector != null)
+			{
+				/*
+				 * Express the Y target in the frame after the Z rotation, discard
+				 * its Z component, then rotate local +Y around the resulting +Z.
+				 * Thus the second rotation cannot disturb the Z alignment.
+				 */
+				float[] yInZFrame = rotateVectorByInverse(orientation, yVector);
+				yInZFrame[2] = 0.0f;
+				if (normalizeAlignmentVector(yInZFrame))
+				{
+					float[] yRotation = alignmentRotationAroundZ(yInZFrame);
+					orientation = multiplyQuaternions(orientation, yRotation);
+				}
 			}
 		}
-
-		float[] rot = M3GMath.setQuatRotation(srcAxis, targetAxis);
-
-		if (constraint != NONE)
+		else if (yVector != null && normalizeAlignmentVector(yVector))
 		{
-			float[] newOrientation = new float[4];
-			M3GMath.mulQuat(orientation, rot, newOrientation);
-			System.arraycopy(newOrientation, 0, orientation, 0, 4);
-		}
-		else
-		{
-			System.arraycopy(rot, 0, orientation, 0, 4);
+			/* With no Z target, align local +Y directly to its target. */
+			orientation = alignmentRotation(new float[]{ 0.0f, 1.0f, 0.0f }, yVector);
 		}
 
-		setOrientation(orientation[0], orientation[1], orientation[2], orientation[3]);
+		setAlignmentOrientation(orientation);
 		return true;
 	}
 
-	static void transformAlignmentTarget(int target, float[] transform, float[] out)
+	/* Return a target point or axis expressed in alignment coordinate system A. */
+	private float[] getAlignmentVector(Node targetNode, int target, float[] thisTranslation)
 	{
-		out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+		Transform targetToParent = new Transform();
+		if (!targetNode.getTransformTo(parent, targetToParent)) { return null; }
 
+		float[] targetVector = new float[]{ 0.0f, 0.0f, 0.0f, 0.0f };
 		switch (target)
 		{
-			case ORIGIN: out[3] = 1.0f; break;
-			case X_AXIS: out[0] = 1.0f; break;
-			case Y_AXIS: out[1] = 1.0f; break;
-			case Z_AXIS: out[2] = 1.0f; break;
+			case ORIGIN: targetVector[3] = 1.0f; break;
+			case X_AXIS: targetVector[0] = 1.0f; break;
+			case Y_AXIS: targetVector[1] = 1.0f; break;
+			case Z_AXIS: targetVector[2] = 1.0f; break;
+			default: return null;
 		}
 
-		float x = transform[0] * out[0] + transform[1] * out[1] + transform[2] * out[2] + transform[3] * out[3];
-		float y = transform[4] * out[0] + transform[5] * out[1] + transform[6] * out[2] + transform[7] * out[3];
-		float z = transform[8] * out[0] + transform[9] * out[1] + transform[10] * out[2] + transform[11] * out[3];
+		targetToParent.transform(targetVector);
+		if (target == ORIGIN)
+		{
+			/* A has the parent axes, but its origin is this node's T. */
+			targetVector[0] -= thisTranslation[0];
+			targetVector[1] -= thisTranslation[1];
+			targetVector[2] -= thisTranslation[2];
+		}
 
-		out[0] = x;
-		out[1] = y;
-		out[2] = z;
-		out[3] = 0;
+		return new float[]{ targetVector[0], targetVector[1], targetVector[2] };
+	}
+
+	private static boolean normalizeAlignmentVector(float[] vector)
+	{
+		float lengthSquared = vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
+		if (lengthSquared <= 1.0e-12f) { return false; }
+
+		float inverseLength = (float) (1.0 / Math.sqrt(lengthSquared));
+		vector[0] *= inverseLength;
+		vector[1] *= inverseLength;
+		vector[2] *= inverseLength;
+		return true;
+	}
+
+	/* Return the shortest unit quaternion that rotates source to target. */
+	private static float[] alignmentRotation(float[] source, float[] target)
+	{
+		float dot = source[0] * target[0] + source[1] * target[1] + source[2] * target[2];
+		if (dot > 1.0f) { dot = 1.0f; }
+		else if (dot < -1.0f) { dot = -1.0f; }
+
+		if (dot > 1.0f - 1.0e-6f)
+			{ return new float[]{ 0.0f, 0.0f, 0.0f, 1.0f }; }
+
+		if (dot < -1.0f + 1.0e-6f)
+		{
+			/* Pick a stable perpendicular axis for a 180 degree rotation. */
+			float[] basis = (Math.abs(source[0]) < Math.abs(source[1]) && Math.abs(source[0]) < Math.abs(source[2]))
+				? new float[]{ 1.0f, 0.0f, 0.0f }
+				: ((Math.abs(source[1]) < Math.abs(source[2]))
+					? new float[]{ 0.0f, 1.0f, 0.0f }
+					: new float[]{ 0.0f, 0.0f, 1.0f });
+			float[] axis = new float[]{
+				source[1] * basis[2] - source[2] * basis[1],
+				source[2] * basis[0] - source[0] * basis[2],
+				source[0] * basis[1] - source[1] * basis[0]
+			};
+			normalizeAlignmentVector(axis);
+			return new float[]{ axis[0], axis[1], axis[2], 0.0f };
+		}
+
+		float[] cross = new float[]{
+			source[1] * target[2] - source[2] * target[1],
+			source[2] * target[0] - source[0] * target[2],
+			source[0] * target[1] - source[1] * target[0]
+		};
+		float scale = (float) (1.0 / Math.sqrt((1.0 + dot) * 2.0));
+		return new float[]{ cross[0] * scale, cross[1] * scale, cross[2] * scale,
+			(float) Math.sqrt((1.0 + dot) * 0.5) };
+	}
+
+	/*
+	 * The constrained Y rotation must be about local +Z, including when the
+	 * projected target is exactly -Y. A general shortest-arc rotation would
+	 * choose an arbitrary perpendicular axis in that latter case and undo the
+	 * Z alignment.
+	 */
+	private static float[] alignmentRotationAroundZ(float[] target)
+	{
+		float targetY = target[1];
+		if (targetY > 1.0f) { targetY = 1.0f; }
+		else if (targetY < -1.0f) { targetY = -1.0f; }
+
+		if (targetY > 1.0f - 1.0e-6f)
+			{ return new float[]{ 0.0f, 0.0f, 0.0f, 1.0f }; }
+		if (targetY < -1.0f + 1.0e-6f)
+			{ return new float[]{ 0.0f, 0.0f, 1.0f, 0.0f }; }
+
+		float scale = (float) (1.0 / Math.sqrt((1.0 + targetY) * 2.0));
+		/* (0,1,0) x (target.x,target.y,0) = (0,0,-target.x). */
+		return new float[]{ 0.0f, 0.0f, -target[0] * scale,
+			(float) Math.sqrt((1.0 + targetY) * 0.5) };
+	}
+
+	/* Rotate a vector by the inverse of a unit quaternion. */
+	private static float[] rotateVectorByInverse(float[] rotation, float[] vector)
+	{
+		float qx = -rotation[0];
+		float qy = -rotation[1];
+		float qz = -rotation[2];
+		float qw = rotation[3];
+		float tx = 2.0f * (qy * vector[2] - qz * vector[1]);
+		float ty = 2.0f * (qz * vector[0] - qx * vector[2]);
+		float tz = 2.0f * (qx * vector[1] - qy * vector[0]);
+
+		return new float[]{
+			vector[0] + qw * tx + qy * tz - qz * ty,
+			vector[1] + qw * ty + qz * tx - qx * tz,
+			vector[2] + qw * tz + qx * ty - qy * tx
+		};
+	}
+
+	/* For column vectors, first * second applies second, then first. */
+	private static float[] multiplyQuaternions(float[] first, float[] second)
+	{
+		float[] result = new float[]{
+			first[3] * second[0] + first[0] * second[3] + first[1] * second[2] - first[2] * second[1],
+			first[3] * second[1] + first[1] * second[3] + first[2] * second[0] - first[0] * second[2],
+			first[3] * second[2] + first[2] * second[3] + first[0] * second[1] - first[1] * second[0],
+			first[3] * second[3] - first[0] * second[0] - first[1] * second[1] - first[2] * second[2]
+		};
+		normalizeQuaternion(result);
+		return result;
+	}
+
+	private static void normalizeQuaternion(float[] quaternion)
+	{
+		float lengthSquared = quaternion[0] * quaternion[0] + quaternion[1] * quaternion[1]
+			+ quaternion[2] * quaternion[2] + quaternion[3] * quaternion[3];
+		if (lengthSquared <= 1.0e-12f)
+		{
+			quaternion[0] = 0.0f;
+			quaternion[1] = 0.0f;
+			quaternion[2] = 0.0f;
+			quaternion[3] = 1.0f;
+			return;
+		}
+
+		float inverseLength = (float) (1.0 / Math.sqrt(lengthSquared));
+		quaternion[0] *= inverseLength;
+		quaternion[1] *= inverseLength;
+		quaternion[2] *= inverseLength;
+		quaternion[3] *= inverseLength;
+	}
+
+	private void setAlignmentOrientation(float[] quaternion)
+	{
+		normalizeQuaternion(quaternion);
+		/* q and -q are equivalent; selecting q.w >= 0 gives angle <= 180 degrees. */
+		if (quaternion[3] < 0.0f)
+		{
+			quaternion[0] = -quaternion[0];
+			quaternion[1] = -quaternion[1];
+			quaternion[2] = -quaternion[2];
+			quaternion[3] = -quaternion[3];
+		}
+
+		float sinHalfAngle = (float) Math.sqrt(quaternion[0] * quaternion[0]
+			+ quaternion[1] * quaternion[1] + quaternion[2] * quaternion[2]);
+		if (sinHalfAngle <= 1.0e-6f)
+		{
+			setOrientation(0.0f, 0.0f, 1.0f, 0.0f);
+			return;
+		}
+
+		float angle = (float) (2.0 * Math.atan2(sinHalfAngle, quaternion[3]) * 180.0 / Math.PI);
+		setOrientation(angle, quaternion[0] / sinHalfAngle, quaternion[1] / sinHalfAngle, quaternion[2] / sinHalfAngle);
 	}
 
 	static boolean isChildOf(Node parent, Node child)
