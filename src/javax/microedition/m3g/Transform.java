@@ -199,6 +199,45 @@ public class Transform
 		m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1;
 	}
 
+	/*
+	 * JSR-184: a Node matrix must be affine, last row (0, 0, 0, 1).
+	 * Some titles write OpenGL / column-major layouts (translation in the
+	 * last row). Read as row-major that becomes projective (w' = t·p) and
+	 * squashes the image when the camera turns. Convert those to affine
+	 * row-major; otherwise just force the last row.
+	 */
+	void setAffineNodeTransform()
+	{
+		float[] m = this.matrix;
+		final float eps = M3GMath.EPSILON;
+		final boolean lastRowClear =
+			Math.abs(m[12]) <= eps && Math.abs(m[13]) <= eps &&
+			Math.abs(m[14]) <= eps && Math.abs(m[15] - 1.0f) <= eps;
+		if (lastRowClear) { return; }
+
+		final boolean lastColClear =
+			Math.abs(m[3]) <= eps && Math.abs(m[7]) <= eps && Math.abs(m[11]) <= eps;
+		final boolean lastRowHasTranslation =
+			Math.abs(m[12]) > eps || Math.abs(m[13]) > eps || Math.abs(m[14]) > eps;
+		final boolean lastRowWOk = Math.abs(m[15] - 1.0f) <= 0.01f;
+
+		if (lastColClear && lastRowHasTranslation && lastRowWOk)
+		{
+			float tmp;
+			tmp = m[1];  m[1]  = m[4];  m[4]  = tmp;
+			tmp = m[2];  m[2]  = m[8];  m[8]  = tmp;
+			tmp = m[3];  m[3]  = m[12]; m[12] = tmp;
+			tmp = m[6];  m[6]  = m[9];  m[9]  = tmp;
+			tmp = m[7];  m[7]  = m[13]; m[13] = tmp;
+			tmp = m[11]; m[11] = m[14]; m[14] = tmp;
+		}
+
+		m[12] = 0.0f;
+		m[13] = 0.0f;
+		m[14] = 0.0f;
+		m[15] = 1.0f;
+	}
+
 	public void transform(float[] vectors)
 	{
 		/* As per JSR-184, throw NullPointerException if the given vector is null. */

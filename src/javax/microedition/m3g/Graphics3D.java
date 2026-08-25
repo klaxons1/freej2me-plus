@@ -647,13 +647,12 @@ public class Graphics3D
 
 		tr.setIdentity();
 
-		// Transform mesh from local space to world space
-		// Receiving a null "transform" indicates that the identity matrix must
-		// be used, which just means we don't need to postMultiply.
-		if (transform != null) { tr.postMultiply(transform); }
-
-		// Apply the inverse of the camera's transform to the mesh (Eye/View Space)
+		// Modelview is V * M (camera inverse, then local-to-world). Column
+		// vectors: eye = V * M * p. The previous M * V order only matched
+		// when V was identity, so lighting flattened as soon as the camera
+		// rotated (QPLAZE/NOMOC orbit is parent Group T*R * child Camera).
 		if (this.currCamTransInv != null) { tr.postMultiply(this.currCamTransInv); }
+		if (transform != null) { tr.postMultiply(transform); }
 
 		if (vertNorms != null && material != null)
 		{
@@ -685,10 +684,10 @@ public class Graphics3D
 			Light light = this.currLights.get(i);
 			Transform lightTrans = this.currLightTrans.get(i);
 
-			// Compute Light World-to-Eye Transform
+			// Light-to-eye is V * L, same convention as mesh modelview.
 			tr.setIdentity();
-			if (lightTrans != null) { tr.postMultiply(lightTrans); }
 			if (this.currCamTransInv != null) { tr.postMultiply(this.currCamTransInv); }
+			if (lightTrans != null) { tr.postMultiply(lightTrans); }
 
 			// Light Position in Eye Space
 			lightVec[0] = 0.0f;
@@ -1054,9 +1053,14 @@ public class Graphics3D
 		else /* Else, set the transform and its inverse accordingly. */
 		{
 			this.currCamTrans.set(transform);
-			this.currCamTransInv.set(transform);
+			// Camera-to-world is a Node transform: last row must be (0,0,0,1).
+			// A projective leftover (OpenGL layout, numerical invert, etc.)
+			// makes w' = t·p and squashes the image when the camera turns.
+			this.currCamTrans.setAffineNodeTransform();
+			this.currCamTransInv.set(this.currCamTrans);
+			this.currCamTransInv.invert();
+			this.currCamTransInv.setAffineNodeTransform();
 		}
-		this.currCamTransInv.invert(); /* This one will execute regardless of the given transform above. */
 	}
 
 	public void setDepthRange(float near, float far)
