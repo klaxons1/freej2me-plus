@@ -22,6 +22,8 @@ import javax.microedition.lcdui.Graphics;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 
 import org.recompile.mobile.Mobile;
 import org.recompile.mobile.PlatformGraphics;
@@ -124,6 +126,74 @@ public class Graphics3D
 	private ArrayList<Light> currLights;
 	private ArrayList<Transform> currLightTrans;
 	private Transform camTr;
+
+	/*
+	 * Deferred rendering queue used by render(node)/render(world). JSR-184
+	 * (Appearance.setLayer) mandates that submeshes and sprites are rasterized
+	 * in ascending Appearance layer order and, within a layer, that all opaque
+	 * (REPLACE) ones come before any blended ones, regardless of the scene
+	 * graph traversal order.
+	 */
+	private final ArrayList<RenderOp> renderQueue = new ArrayList<RenderOp>();
+
+	// One queued submesh or sprite, with everything needed to rasterize it later.
+	private static final class RenderOp
+	{
+		final VertexBuffer vertices;
+		final IndexBuffer triangles;
+		final Appearance appearance;
+		final Sprite3D sprite;
+		final Transform transform;
+		final int scope;
+		final int queueIndex; // Keeps the sort stable
+
+		// Submesh op
+		RenderOp(VertexBuffer vertices, IndexBuffer triangles, Appearance appearance, Transform transform, int scope, int queueIndex)
+		{
+			this.vertices = vertices;
+			this.triangles = triangles;
+			this.appearance = appearance;
+			this.sprite = null;
+			// Traversal and rasterization happen synchronously within one render()
+			// call, so the reference can be kept without a defensive copy.
+			this.transform = transform;
+			this.scope = scope;
+			this.queueIndex = queueIndex;
+		}
+
+		// Sprite op
+		RenderOp(Sprite3D sprite, Transform transform, int queueIndex)
+		{
+			this.vertices = null;
+			this.triangles = null;
+			this.appearance = sprite.getAppearance();
+			this.sprite = sprite;
+			this.transform = transform;
+			this.scope = sprite.getScope();
+			this.queueIndex = queueIndex;
+		}
+
+		// Sort key: (layer << 1) | blended. A submesh or sprite is opaque if it
+		// uses REPLACE blending (or the CompositingMode defaults, which do), and
+		// blended otherwise. Layer is in [-63, 63], so no overflow to worry about.
+		final int sortKey()
+		{
+			final CompositingMode cm = appearance.getCompositingMode();
+			final boolean blended = (cm != null) && (cm.getBlending() != CompositingMode.REPLACE);
+			return (appearance.getLayer() << 1) | (blended ? 1 : 0);
+		}
+	}
+
+	private static final Comparator<RenderOp> RENDER_ORDER = new Comparator<RenderOp>()
+	{
+		public int compare(RenderOp a, RenderOp b)
+		{
+			final int keyA = a.sortKey(), keyB = b.sortKey();
+			if (keyA != keyB) { return (keyA < keyB) ? -1 : 1; }
+			// Same layer and blendedness: keep the scene graph traversal order.
+			return (a.queueIndex < b.queueIndex) ? -1 : 1;
+		}
+	};
 
 	// Reusable rendering variables
 	int canvasWidth, canvasHeight, paintPixel;
@@ -542,6 +612,25 @@ public class Graphics3D
 		/* Also per JSR-184, throw IllegalStateException if if node is not a Sprite3D, Mesh, or Group Object. */
 		if (!(node instanceof Mesh || node instanceof Sprite3D || node instanceof Group)) { throw new IllegalArgumentException("Node is not an instance of any of the following: Sprite3D, Mesh, Group"); }
 
+		/*
+		 * Per JSR-184 (Appearance.setLayer), when rendering a World, Group or Mesh,
+		 * submeshes and sprites must be rendered in ascending Appearance layer order
+		 * and, within the same layer, all opaque (REPLACE blending) submeshes and
+		 * sprites must be rendered before any blended ones, regardless of their
+		 * position in the scene graph. So instead of rasterizing during traversal,
+		 * collect everything into a queue, stable-sort it by (layer, blendedness),
+		 * and only then rasterize. The stable sort preserves the scene graph
+		 * traversal order among submeshes that share the same sorting key.
+		 */
+		renderQueue.clear();
+		queueNode(node, transform);
+		flushRenderQueue();
+	}
+
+	// Traverses the scene graph, collecting all renderable submeshes and sprites
+	// into renderQueue. Mirrors the retained-mode traversal rules of render(node).
+	private void queueNode(Node node, Transform transform)
+	{
 		// Node not renderable? Skip it and its children.
 		if(!node.isRenderingEnabled()) { return; }
 
@@ -552,7 +641,10 @@ public class Graphics3D
 			VertexBuffer vertices = mesh.getVertexBuffer();
 			for (int i = 0; i < subMeshes; i++)
 			{
-				if (mesh.getAppearance(i) != null) { render(vertices, mesh.getIndexBuffer(i), mesh.getAppearance(i), transform, node.getScope()); }
+				if (mesh.getAppearance(i) != null)
+				{
+					renderQueue.add(new RenderOp(vertices, mesh.getIndexBuffer(i), mesh.getAppearance(i), transform, node.getScope(), renderQueue.size()));
+				}
 			}
 
 			/*
@@ -567,10 +659,17 @@ public class Graphics3D
 				Transform sktr = new Transform();
 				skeleton.getCompositeTransform(sktr);
 				if (transform != null) { sktr.preMultiply(transform); }
-				render(skeleton, sktr);
+				queueNode(skeleton, sktr);
 			}
 		}
-		else if (node instanceof Sprite3D) { renderSprite((Sprite3D) node, transform); }
+		else if (node instanceof Sprite3D)
+		{
+			// Sprites with no appearance are not rendered, and cannot be sorted either.
+			if (((Sprite3D) node).getAppearance() != null)
+			{
+				renderQueue.add(new RenderOp((Sprite3D) node, transform, renderQueue.size()));
+			}
+		}
 		else if (node instanceof Group)
 		{
 			Node child = ((Group) node).firstChild;
@@ -584,12 +683,29 @@ public class Graphics3D
 						child.getCompositeTransform(nodetr);
 						if(transform != null) { nodetr.preMultiply(transform); }
 
-						render(child, nodetr);
+						queueNode(child, nodetr);
 					}
 					child = child.right;
 				} while (child != ((Group) node).firstChild);
 			}
 		}
+	}
+
+	// Sorts the collected render operations per the JSR-184 layering rules,
+	// rasterizes them in that order, and empties the queue.
+	private void flushRenderQueue()
+	{
+		Collections.sort(renderQueue, RENDER_ORDER);
+
+		final int ops = renderQueue.size();
+		for (int i = 0; i < ops; i++)
+		{
+			RenderOp op = renderQueue.get(i);
+			if (op.sprite != null) { renderSprite(op.sprite, op.transform); }
+			else { render(op.vertices, op.triangles, op.appearance, op.transform, op.scope); }
+		}
+
+		renderQueue.clear();
 	}
 
 	public void render(VertexBuffer vertices, IndexBuffer triangles, Appearance appearance, Transform transform)
