@@ -160,7 +160,7 @@ class Triangle
 			if (hasLighting)
 			{
 				calculateLighting(eyePos, vertNorms, normalMatrix, material, shadingMode, twoSide,
-					localCameraLight, lights, lightEyePos, lightEyeDir, curScope, tris, tri_id, Triangle.inC);
+					isFrontFace, localCameraLight, lights, lightEyePos, lightEyeDir, curScope, tris, tri_id, Triangle.inC);
 			}
 
 			/*
@@ -195,10 +195,16 @@ class Triangle
 
 	private static final void calculateLighting(
 		float[] eyePos, VertexArray vertNorms, Transform normalMatrix,
-		Material material, int shadingMode, boolean twoSided, boolean localCameraLight,
+		Material material, int shadingMode, boolean twoSided, boolean frontFace, boolean localCameraLight,
 		ArrayList<Light> lights, float[] lightEyePos, float[] lightEyeDir,
 		int curScope, int[] tris, int tri_id, int[] outColors)
 	{
+		// JSR-184 two-sided lighting: normals of a back-facing polygon are
+		// reversed (n' = -n) so that both faces of a surface are lit. The
+		// facing is decided once per polygon from its winding, not from a
+		// per-vertex approximation of the view direction, which is exactly what
+		// the spec calls for.
+		final boolean reverseNormals = twoSided && !frontFace;
 		// Material Colors
 		int matAmbient  = material.getColor(Material.AMBIENT);
 		int matDiffuse  = material.getColor(Material.DIFFUSE);
@@ -262,6 +268,15 @@ class Triangle
 			N_EYE[2] = L_MAT[8] * nx + L_MAT[9] * ny + L_MAT[10] * nz;
 
 			M3GMath.normalize(N_EYE);
+
+			// Two-sided lighting: flip the eye-space normal so a back-facing
+			// polygon is lit as if it faced the viewer, per JSR-184.
+			if (reverseNormals)
+			{
+				N_EYE[0] = -N_EYE[0];
+				N_EYE[1] = -N_EYE[1];
+				N_EYE[2] = -N_EYE[2];
+			}
 
 			V_EYE[0] = eyePos[vertIndex * 4];
 			V_EYE[1] = eyePos[vertIndex * 4 + 1];
@@ -368,19 +383,6 @@ class Triangle
 				if (attenuation <= 0.0f) { continue; }
 
 				nx = N_EYE[0]; ny = N_EYE[1]; nz = N_EYE[2];
-				// Handle Two-Sided Materials by flipping normals. TODO: UNTESTED!
-				if (twoSided)
-				{
-					// Dot product between transformed normal and eye-to-vertex direction.
-					// Are they negative? Flip the eye normals so we can light the other side.
-					float nDotV = N_EYE[0] * viewX + N_EYE[1] * viewY + N_EYE[2] * viewZ;
-					if (nDotV < 0.0f)
-					{
-						nx = -nx;
-						ny = -ny;
-						nz = -nz;
-					}
-				}
 
 				// Calculate Dot Product between the normal and light (N . L)
 				float nDotL = nx * lightDirX + ny * lightDirY + nz * lightDirZ;

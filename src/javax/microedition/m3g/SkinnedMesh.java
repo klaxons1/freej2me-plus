@@ -618,20 +618,20 @@ public class SkinnedMesh extends Mesh
 
 		float invDet = 1.0f / det;
 
-		// Inverse of the 3x3, then transposed.
-		float inv00 = (e * i - f * h) * invDet;
-		float inv01 = (c * h - b * i) * invDet;
-		float inv02 = (b * f - c * e) * invDet;
-		float inv10 = (f * g - d * i) * invDet;
-		float inv11 = (a * i - c * g) * invDet;
-		float inv12 = (b * g - a * h) * invDet;
-		float inv20 = (d * h - e * g) * invDet;
-		float inv21 = (c * d - a * f) * invDet;
-		float inv22 = (a * e - b * d) * invDet;
-
-		out[0] = inv00; out[1] = inv10; out[2] = inv20;
-		out[4] = inv01; out[5] = inv11; out[6] = inv21;
-		out[8] = inv02; out[9] = inv12; out[10] = inv22;
+		/*
+		 * Place transpose(inverse) of the 3x3, that is, the inverse-transpose,
+		 * directly into the row-major 4x4 slots that Transform.get() uses. Each
+		 * entry is transpose(adjugate)_{row,col} / det.
+		 */
+		out[0]  = (e * i - f * h) * invDet;
+		out[1]  = (f * g - d * i) * invDet;
+		out[2]  = (d * h - e * g) * invDet;
+		out[4]  = (c * h - b * i) * invDet;
+		out[5]  = (a * i - c * g) * invDet;
+		out[6]  = (b * g - a * h) * invDet;
+		out[8]  = (b * f - c * e) * invDet;
+		out[9]  = (c * d - a * f) * invDet;
+		out[10] = (a * e - b * d) * invDet;
 		out[15] = 1.0f;
 
 		return out;
