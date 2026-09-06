@@ -297,6 +297,12 @@ public class SkinnedMesh extends Mesh
 		Transform boneToMesh = new Transform();
 		Transform finalSkinning = new Transform();
 
+		// Per JSR-184, normals are transformed by the inverse-transpose of the
+		// position skinning matrix, so they remain perpendicular to the deformed
+		// surface even when a bone applies non-uniform scale or shear. For a
+		// pure rotation this is the same as the rotation itself.
+		float[][] normalMatrices = new float[numBones][16];
+
 		for (int b = 0; b < numBones; b++)
 		{
 			BoneData data = bones.get(b);
@@ -311,6 +317,9 @@ public class SkinnedMesh extends Mesh
 			finalSkinning.set(boneToMesh);
 			finalSkinning.postMultiply(data.initialTransform);
 			finalSkinning.get(skinningMatrices[b]);
+
+			// 3. Inverse-transpose the skinning matrix for normal skinning.
+			normalMatrices[b] = inverseTranspose3x3(skinningMatrices[b]);
 		}
 
 		int componentType = basePositions.getComponentType();
@@ -361,6 +370,7 @@ public class SkinnedMesh extends Mesh
 		{
 			BoneData bd = bones.get(b);
 			float[] m = skinningMatrices[b];
+			float[] nm = normalMatrices[b];
 			float w = (float) bd.weight;
 
 			for (int i = 0; i < bd.numVertices; i++)
@@ -386,10 +396,11 @@ public class SkinnedMesh extends Mesh
 					float ny = floatNormals[offset + 1];
 					float nz = floatNormals[offset + 2];
 
-					// Normals only get the rotation and scaling parts of the matrix
-					accumulatedNormalsX[vIdx] += (m[0] * nx + m[1] * ny + m[2] * nz) * w;
-					accumulatedNormalsY[vIdx] += (m[4] * nx + m[5] * ny + m[6] * nz) * w;
-					accumulatedNormalsZ[vIdx] += (m[8] * nx + m[9] * ny + m[10] * nz) * w;
+					// Normals are transformed by the inverse-transpose of the
+					// skinning matrix (the upper-left 3x3 of normalMatrices[b]).
+					accumulatedNormalsX[vIdx] += (nm[0] * nx + nm[1] * ny + nm[2] * nz) * w;
+					accumulatedNormalsY[vIdx] += (nm[4] * nx + nm[5] * ny + nm[6] * nz) * w;
+					accumulatedNormalsZ[vIdx] += (nm[8] * nx + nm[9] * ny + nm[10] * nz) * w;
 				}
 			}
 		}
@@ -569,5 +580,60 @@ public class SkinnedMesh extends Mesh
 				blendedNormals.set(0, numVertices, outRaw);
 			}
 		}
+	}
+
+	/*
+	 * Computes the inverse-transpose of the upper-left 3x3 of an affine matrix,
+	 * packed into a 16-element array in the row-major layout used by
+	 * Transform.get(). This is the matrix that transforms surface normals: a
+	 * position is transformed by the matrix itself, while a normal must be
+	 * transformed by the inverse-transpose so it stays perpendicular to a
+	 * surface under non-uniform scale and shear.
+	 *
+	 * The bottom-right element is set to 1 and the translation/perspective rows
+	 * are zeroed; normals carry w = 0 so neither affects them.
+	 */
+	private static float[] inverseTranspose3x3(float[] m)
+	{
+		float a = m[0], b = m[1], c = m[2];
+		float d = m[4], e = m[5], f = m[6];
+		float g = m[8], h = m[9], i = m[10];
+
+		float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+
+		float[] out = new float[16];
+
+		// Degenerate (non-invertible) bone transform, e.g. one that collapsed
+		// to zero scale. Keep the vectors as-is rather than dropping the mesh's
+		// lighting; the renderer makes the same pragmatic choice for a
+		// non-invertible view-to-camera normal matrix.
+		if (M3GMath.abs(det) < M3GMath.EPSILON)
+		{
+			out[0] = a; out[1] = b; out[2] = c;
+			out[4] = d; out[5] = e; out[6] = f;
+			out[8] = g; out[9] = h; out[10] = i;
+			out[15] = 1.0f;
+			return out;
+		}
+
+		float invDet = 1.0f / det;
+
+		// Inverse of the 3x3, then transposed.
+		float inv00 = (e * i - f * h) * invDet;
+		float inv01 = (c * h - b * i) * invDet;
+		float inv02 = (b * f - c * e) * invDet;
+		float inv10 = (f * g - d * i) * invDet;
+		float inv11 = (a * i - c * g) * invDet;
+		float inv12 = (b * g - a * h) * invDet;
+		float inv20 = (d * h - e * g) * invDet;
+		float inv21 = (c * d - a * f) * invDet;
+		float inv22 = (a * e - b * d) * invDet;
+
+		out[0] = inv00; out[1] = inv10; out[2] = inv20;
+		out[4] = inv01; out[5] = inv11; out[6] = inv21;
+		out[8] = inv02; out[9] = inv12; out[10] = inv22;
+		out[15] = 1.0f;
+
+		return out;
 	}
 }
