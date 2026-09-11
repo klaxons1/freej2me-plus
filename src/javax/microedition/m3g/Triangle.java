@@ -41,6 +41,23 @@ class Triangle
 	private static final float[] outV = new float[16];
 	private static final float[][] outT = new float[Graphics3D.NUM_TEXTURE_UNITS][16];
 
+	// Second clip stage buffers: a triangle clipped by two planes can reach 5 vertices.
+	private static final int[] out2C = new int[5];
+	private static final float[] out2V = new float[20];
+	private static final float[][] out2T = new float[Graphics3D.NUM_TEXTURE_UNITS][20];
+
+	/*
+	 * Minimum clip-space W for rasterization. With stock projection matrices the
+	 * near-plane clip (z >= -w) already guarantees w >= near > 0, but GENERIC
+	 * projections with a replaced (oblique) near plane - portal renderers use
+	 * these so geometry in front of the destination portal never shows - can
+	 * accept vertices that sit BESIDE or BEHIND the virtual camera, where w is
+	 * negative. Dividing by a negative w mirrors the vertex across the screen
+	 * center, smearing e.g. floors and ceilings that extend past the camera all
+	 * over the frame. Those vertices must be clipped against w >= epsilon first.
+	 */
+	private static final float W_EPSILON = 1e-5f;
+
 	// Temporary variables for lighting calculations.
 	private static int matAmbient, matDiffuse, matSpecular, matEmissive, lightAlpha;
 	private static float shininess, maR, mdR, msR, meR, maG, mdG, msG, meG, maB, mdB, msB, meB;
@@ -95,19 +112,19 @@ class Triangle
 		hasColors = hasLighting || hasColors;
 
 		// Only allocate a new triangle array if it doesn't exist, or cannot fit the incoming mesh.
-		// Near-plane clipping can split a crossing triangle into two, hence the `* 2`, as
-		// the worst case here is a single triangle that takes the whole screen and is clipped to 2.
-		if(Triangle.result == null || totalTris * 2 > Triangle.result.length)
+		// Clipping against the minimum-W and near planes can grow a triangle into
+		// a 5-gon, which fans into 3 triangles, hence the `* 3`.
+		if(Triangle.result == null || totalTris * 3 > Triangle.result.length)
 		{
 			// Let's start off by copying the references of the old array to the
 			// new one. Saves having to reallocate all objects again whenever
 			// the size increases, as we can just reuse the same references.
 			final int oldLen = (Triangle.result == null) ? 0 : Triangle.result.length;
 
-			Triangle[] newRef = new Triangle[totalTris * 2];
+			Triangle[] newRef = new Triangle[totalTris * 3];
 			if (oldLen > 0) { System.arraycopy(Triangle.result, 0, newRef, 0, oldLen); }
 
-			for (int i = oldLen; i < totalTris * 2; i++) {newRef[i] = new Triangle(); }
+			for (int i = oldLen; i < totalTris * 3; i++) {newRef[i] = new Triangle(); }
 			Triangle.result = newRef;
 		}
 
@@ -235,31 +252,59 @@ class Triangle
 			 * First though, check if we even need to clip it at all, and save
 			 * a method call and a few copy operations if we don't.
 			 */
-			final int outCount;
-			final float[] srcV;
-			final float[][] srcT;
-			final int[] srcC;
+			int outCount;
+			float[] srcV;
+			float[][] srcT;
+			int[] srcC;
 
 			final boolean needsNearClip = (Triangle.inV[2] < -Triangle.inV[3]) ||
 				(Triangle.inV[6] < -Triangle.inV[7])  ||
 				(Triangle.inV[10] < -Triangle.inV[11]);
-			if (!needsNearClip)
+
+			/*
+			 * Vertices with w < epsilon can only pass the near-plane test under
+			 * GENERIC projections with a replaced (oblique) near plane; letting
+			 * them through would mirror them across the screen center at the
+			 * perspective division (see W_EPSILON). Clip them away first.
+			 */
+			final boolean needsWClip = (Triangle.inV[3] < W_EPSILON) ||
+				(Triangle.inV[7] < W_EPSILON)  ||
+				(Triangle.inV[11] < W_EPSILON);
+
+			if (!needsNearClip && !needsWClip)
 			{
 				outCount = 3;
 				srcV = Triangle.inV;
 				srcT = Triangle.inT;
 				srcC = Triangle.inC;
 			}
-			else
+			else if (!needsWClip)
 			{
-				outCount = clipNearPlane(Triangle.inV, Triangle.inT, Triangle.inC,
-						hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
+				outCount = clipPoly(Triangle.inV, Triangle.inT, Triangle.inC, 3,
+						true, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
 
 				if (outCount < 3) { continue; }
 
 				srcV = Triangle.outV;
 				srcT = Triangle.outT;
 				srcC = Triangle.outC;
+			}
+			else
+			{
+				// W-plane first so the near-plane stage divides by sane values.
+				outCount = clipPoly(Triangle.inV, Triangle.inT, Triangle.inC, 3,
+						false, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
+
+				if (outCount < 3) { continue; }
+
+				outCount = clipPoly(Triangle.outV, Triangle.outT, Triangle.outC, outCount,
+						true, hasTex, texc, Triangle.out2V, Triangle.out2T, Triangle.out2C);
+
+				if (outCount < 3) { continue; }
+
+				srcV = Triangle.out2V;
+				srcT = Triangle.out2T;
+				srcC = Triangle.out2C;
 			}
 
 			/* Triangulate the resulting polygon (3 or 4 vertices) as a fan. */
@@ -601,21 +646,26 @@ class Triangle
 	 * Sutherland-Hodgman clip of one triangle against the homogeneous near plane
 	 * z + w >= 0. This is valid for perspective, parallel and generic projection
 	 * matrices; camera-space distances are not available for a generic matrix.
-	 * Writes the resulting polygon (0, 3 or 4 vertices) into outV/outT and returns
-	 * its vertex count. Positions, texture coordinates and vertex colors
-	 * interpolate linearly in clip space, which is exact for all.
+	 * Writes the resulting polygon into outV/outT and returns its vertex count
+	 * (an n-gon gains at most one vertex per clip plane). Positions, texture
+	 * coordinates and vertex colors interpolate linearly in clip space, which is
+	 * exact for all.
+	 *
+	 * Clips against the near plane (z >= -w) when nearPlane is true, or against
+	 * the minimum-W plane (w >= W_EPSILON) otherwise. The latter is required for
+	 * GENERIC projections with a replaced near plane (see W_EPSILON above).
 	 */
-	private static final int clipNearPlane(float[] inV, float[][] inT, int[] inC,
-		boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC)
+	private static final int clipPoly(float[] inV, float[][] inT, int[] inC, int count,
+		boolean nearPlane, boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC)
 	{
 		int outCount = 0;
 
-		for (int i = 0; i < 3; i++)
+		for (int i = 0; i < count; i++)
 		{
-			final int j = (i + 1) & ((i - 2) >> 31); // j = (i + 1) % 3
+			final int j = (i + 1 == count) ? 0 : i + 1;
 			final float wi = inV[4*i+3], wj = inV[4*j+3];
-			final float distanceI = inV[4*i+2] + wi;
-			final float distanceJ = inV[4*j+2] + wj;
+			final float distanceI = nearPlane ? inV[4*i+2] + wi : wi - W_EPSILON;
+			final float distanceJ = nearPlane ? inV[4*j+2] + wj : wj - W_EPSILON;
 			final boolean insideI = distanceI >= 0.0f, insideJ = distanceJ >= 0.0f;
 
 			if (insideI)
