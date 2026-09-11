@@ -608,7 +608,15 @@ public class Graphics3D
 		final Fog fog = Mobile.m3gDisableFog ? null : appearance.getFog();
 		final float invFogDiv = fog != null ? M3GMath.fastReciprocal(fog.getFarDistance() - fog.getNearDistance()) : 0.0f;
 
-		perspectiveCorrection = fog != null || (perspectiveCorrection && (projType == Camera.PERSPECTIVE)); // fog usage enables it
+		/*
+		 * Fog usage enables correction, and GENERIC projections must not disable
+		 * it: engines that need custom frustums (oblique near-plane clipping,
+		 * portal sub-frustums) build a perspective matrix by hand and set it via
+		 * Camera.setGeneric(), so their W still varies per vertex and affine
+		 * texturing warps exactly the same way. Only PARALLEL (W constant) makes
+		 * the correction pointless.
+		 */
+		perspectiveCorrection = fog != null || (perspectiveCorrection && (projType != Camera.PARALLEL));
 		perspectiveCorrection = (Mobile.m3gPerspectiveCorrectionMode == MODE_FORCE_ENABLE)
 			|| (Mobile.m3gPerspectiveCorrectionMode == MODE_APP_CONTROLLED && perspectiveCorrection);
 
