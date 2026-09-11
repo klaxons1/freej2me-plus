@@ -1603,17 +1603,39 @@ public class Graphics3D
 				}
 			}
 
+			// Next pixel at which the perspective span must be recomputed.
+			int nextSync = ixL;
+
 			// Draw the pixels for the current y-coordinate
 			for (int x = ixL; x < ixR; x++, z += zStep, pw += pwStep, invPw += stepInvPw, fogFactor += stepFogFactor, rasterIdx++)
 			{
 				// Subsampling block. A.K.A, where we calculate anything that
 				// is too expensive to run per-pixel but cannot be done only once
 				// for the whole triangle Y scanline due to large precision loss.
-				if (doPerspective && ((x & Mobile.m3gPerspCorrSubFactor) == 0 | x == ixL))
+				if (doPerspective && x >= nextSync)
 				{
-					int maxSpan = (Mobile.m3gPerspCorrSubFactor + 1) -
-						(x & Mobile.m3gPerspCorrSubFactor);
+					int maxSpan = Mobile.m3gPerspCorrSubFactor + 1;
 					int spanLen = (ixR - x < maxSpan) ? ixR - x : maxSpan;
+
+					/*
+					 * The secant approximation of 1/w is exact at span ends but
+					 * bows inside the span, and the error grows with how much w
+					 * changes across it. Far away that change is negligible, but
+					 * on triangles grazing the near plane w can shift by whole
+					 * orders of magnitude within one span, warping UVs by
+					 * hundreds of texels. Halve the span until w varies by no
+					 * more than ~12.5% across it, which keeps the error at
+					 * sub-texel levels while leaving distant spans at full size.
+					 */
+					final float absPwStep = pwStep < 0.0f ? -pwStep : pwStep;
+					while (spanLen > 1 && absPwStep * spanLen > 0.125f * pw) { spanLen >>= 1; }
+
+					// Re-synchronize the accumulated 1/w against the exact pw
+					// with one Newton-Raphson step; costs two multiplies and
+					// kills the drift the += accumulation builds up over spans.
+					invPw = invPw * (2.0f - pw * invPw);
+
+					nextSync = x + spanLen;
 					float invSpanLen = INV_SPAN_TABLE[spanLen];
 
 					// Calling M3GMath.fastReciprocal() in here was deemed
