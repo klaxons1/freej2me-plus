@@ -276,14 +276,28 @@ class Triangle
 				(Triangle.inV[10] < -Triangle.inV[11]);
 
 			/*
-			 * Vertices with w < epsilon can only pass the near-plane test under
-			 * GENERIC projections with a replaced (oblique) near plane; letting
-			 * them through would mirror them across the screen center at the
-			 * perspective division (see W_EPSILON). Clip them away first.
+			 * Vertices with tiny or negative w can only pass the near-plane test
+			 * under GENERIC projections with a replaced (oblique) near plane.
+			 * Negative w would mirror them across the screen center at the
+			 * perspective division (see W_EPSILON); tiny positive w is nearly as
+			 * bad: screen coordinates and s/w blow up by orders of magnitude and
+			 * float32 gradient math turns into multi-texel UV noise on the
+			 * visible end of the triangle (seen when turning the camera right at
+			 * a portal). Clip against a threshold RELATIVE to the triangle's
+			 * largest w, which bounds the dynamic range of the interpolants to
+			 * 1024x and keeps the error sub-texel; the discarded sliver is
+			 * wMax/1024 deep at the camera plane, too thin to ever be visible.
 			 */
-			final boolean needsWClip = (Triangle.inV[3] < W_EPSILON) ||
-				(Triangle.inV[7] < W_EPSILON)  ||
-				(Triangle.inV[11] < W_EPSILON);
+			float wMax = Triangle.inV[3];
+			if (Triangle.inV[7]  > wMax) { wMax = Triangle.inV[7];  }
+			if (Triangle.inV[11] > wMax) { wMax = Triangle.inV[11]; }
+
+			float wLimit = wMax * (1.0f / 1024.0f);
+			if (wLimit < W_EPSILON) { wLimit = W_EPSILON; }
+
+			final boolean needsWClip = (Triangle.inV[3] < wLimit) ||
+				(Triangle.inV[7] < wLimit)  ||
+				(Triangle.inV[11] < wLimit);
 
 			if (!needsNearClip && !needsWClip)
 			{
@@ -295,7 +309,7 @@ class Triangle
 			else if (!needsWClip)
 			{
 				outCount = clipPoly(Triangle.inV, Triangle.inT, Triangle.inC, 3,
-						true, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
+						true, 0.0f, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
 
 				if (outCount < 3) { continue; }
 
@@ -307,12 +321,12 @@ class Triangle
 			{
 				// W-plane first so the near-plane stage divides by sane values.
 				outCount = clipPoly(Triangle.inV, Triangle.inT, Triangle.inC, 3,
-						false, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
+						false, wLimit, hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
 
 				if (outCount < 3) { continue; }
 
 				outCount = clipPoly(Triangle.outV, Triangle.outT, Triangle.outC, outCount,
-						true, hasTex, texc, Triangle.out2V, Triangle.out2T, Triangle.out2C);
+						true, 0.0f, hasTex, texc, Triangle.out2V, Triangle.out2T, Triangle.out2C);
 
 				if (outCount < 3) { continue; }
 
@@ -710,11 +724,11 @@ class Triangle
 	 * exact for all.
 	 *
 	 * Clips against the near plane (z >= -w) when nearPlane is true, or against
-	 * the minimum-W plane (w >= W_EPSILON) otherwise. The latter is required for
+	 * the minimum-W plane (w >= wLimit) otherwise. The latter is required for
 	 * GENERIC projections with a replaced near plane (see W_EPSILON above).
 	 */
 	private static final int clipPoly(float[] inV, float[][] inT, int[] inC, int count,
-		boolean nearPlane, boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC)
+		boolean nearPlane, float wLimit, boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC)
 	{
 		int outCount = 0;
 
@@ -722,8 +736,8 @@ class Triangle
 		{
 			final int j = (i + 1 == count) ? 0 : i + 1;
 			final float wi = inV[4*i+3], wj = inV[4*j+3];
-			final float distanceI = nearPlane ? inV[4*i+2] + wi : wi - W_EPSILON;
-			final float distanceJ = nearPlane ? inV[4*j+2] + wj : wj - W_EPSILON;
+			final float distanceI = nearPlane ? inV[4*i+2] + wi : wi - wLimit;
+			final float distanceJ = nearPlane ? inV[4*j+2] + wj : wj - wLimit;
 			final boolean insideI = distanceI >= 0.0f, insideJ = distanceJ >= 0.0f;
 
 			if (insideI)
