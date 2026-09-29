@@ -1773,14 +1773,38 @@ public final class FJGUI
 
 	public String getJarPath() { return jarfile; }
 
+	public void setJarPath(String jarpath) { jarfile = jarpath; }
+
 	public boolean hasJustLoaded() { return firstLoad; }
 
 	public void showRestartDialog()
 	{
 		// If we're still in the init stage, ignore changes that call this up.
 		if(!this.allowRestartDialog) { return; }
-		swingDialogs[3].setLocationRelativeTo(main);
-		swingDialogs[3].setVisible(true);
+
+		/*
+		 * This dialog is modal, so it must never be made visible from outside the EDT
+		 * (it would block whichever thread called it), nor from inside a native event
+		 * loop like the one Drag and Drop runs on Windows, as the dialog would either
+		 * not show up at all or show up without ever being painted. Posting it to the
+		 * end of the EDT queue makes sure it is only shown once the caller's event
+		 * (menu click, drop, etc) has been fully processed.
+		 */
+		SwingUtilities.invokeLater(new Runnable()
+		{
+			public void run()
+			{
+				if(swingDialogs[3].isVisible())
+				{
+					// Already up, just make sure the user can see it.
+					swingDialogs[3].toFront();
+					return;
+				}
+				swingDialogs[3].setLocationRelativeTo(main);
+				swingDialogs[3].setAlwaysOnTop(true);
+				swingDialogs[3].setVisible(true);
+			}
+		});
 	}
 
 	public void updateDialogs()
