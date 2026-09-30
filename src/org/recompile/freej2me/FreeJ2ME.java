@@ -312,7 +312,7 @@ public class FreeJ2ME
 	{
 		try
 		{
-			String java = System.getProperty("java.home") + "/bin/java";
+			String java = Mobile.getJavaExecutablePath();
 			String classPath = System.getProperty("java.class.path");
 
 			String[] commands = new String[] { java, "-Dfile.encoding="+Mobile.textEncoding, "-cp", classPath, FreeJ2ME.class.getName() };
@@ -1029,30 +1029,24 @@ public class FreeJ2ME
 						repaint();
 					}
 
-					/*
-					 * Only act on the dropped file after the drop has been completed above.
-					 * Loading an app (or bringing up the modal "restart required" dialog) while
-					 * the native Drag and Drop loop is still running makes the whole operation
-					 * hang or silently do nothing, which is why dropping a second app over a
-					 * running one used to appear to be ignored.
-					 */
-					if (droppedFile != null)
+				/*
+				 * Only act on the dropped file after the drop has been completed above.
+				 * Loading an app (or bringing up the modal "restart required" dialog) while
+				 * the native Drag and Drop loop is still running makes the whole operation
+				 * hang or silently do nothing, which is why dropping a second app over a
+				 * running one used to appear to be ignored.
+				 */
+				if (droppedFile != null)
+				{
+					final File pendingFile = droppedFile;
+
+					Mobile.log(Mobile.LOG_INFO, FreeJ2ME.class.getPackage().getName() + "." + FreeJ2ME.class.getSimpleName() + ": " + "App dropped: " + pendingFile.getAbsolutePath());
+
+					SwingUtilities.invokeLater(new Runnable()
 					{
-						final String droppedPath = droppedFile.toURI().toString();
-						SwingUtilities.invokeLater(new Runnable()
-						{
-							public void run()
-							{
-								if (!fjGUI.hasLoadedFile()) { fjGUI.loadJarFile(droppedPath); }
-								else
-								{
-									MobilePlatform.fileName = droppedPath;
-									fjGUI.setJarPath(droppedPath);
-									fjGUI.showRestartDialog();
-								}
-							}
-						});
-					}
+						public void run() { fjGUI.openFile(pendingFile); }
+					});
+				}
 				}
 			});
 		}

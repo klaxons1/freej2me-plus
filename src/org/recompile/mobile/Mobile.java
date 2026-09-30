@@ -22,12 +22,11 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URL;
+import java.net.URI;
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.Queue;
-import java.util.jar.Attributes;
-import java.util.jar.JarFile;
-import java.util.jar.Manifest;
+import java.util.StringTokenizer;
 
 import javax.microedition.lcdui.Display;
 import javax.microedition.lcdui.Canvas;
@@ -1219,60 +1218,135 @@ public class Mobile
 		return false;
 	}
 
+	/* Main class of the standalone frontend, used when FreeJ2ME wasn't launched from a jar of its own */
+	private static final String STANDALONE_MAIN_CLASS = "org.recompile.freej2me.FreeJ2ME";
+
 	public static void restartApp()
 	{
+		if(MobilePlatform.isLibretro)
+		{
+			/* Libretro governs loading the process up again and not the jar, so post a request for it to do so */
+			libretroRestartRequested = 1;
+			if(textEncoding.equals("ISO_8859_1"))         { libretroEncodingRequested = 0; }
+			else if(textEncoding.equals("Shift_JIS"))     { libretroEncodingRequested = 1; }
+			else if(textEncoding.equals("EUC_KR"))        { libretroEncodingRequested = 2; }
+			/* TODO: Support other encodings */
+			return;
+		}
+
 		try
 		{
-			String java = System.getProperty("java.home") + "/bin/java";
-			String classPath = System.getProperty("java.class.path");
+			final String javaBin     = getJavaExecutablePath();
+			final String classPath   = System.getProperty("java.class.path");
+			final String launcherJar = getLauncherJarPath(classPath);
+			final String jarPath     = getCurrentJarPath();
 
-			// Get the main class name
-			String mainClass = getMainClassFromJar("file:" + classPath);
+			final ArrayList<String> command = new ArrayList<String>();
 
-			String jarPath = null;
+			command.add(javaBin);
 
-			if(MobilePlatform.fileName != null)
+			/*
+			 * Every JVM option has to be handed over before the jar (or the main class) that
+			 * the new instance will run, otherwise the launcher mistakes the option for the
+			 * jar file itself and dies right away with "Unable to access jarfile". That is
+			 * why "Restart Running Jar" -- and with it, dropping a second app over a running
+			 * one -- used to close the emulator without ever bringing a new window up.
+			 */
+			command.add("-Dfile.encoding=" + textEncoding);
+
+			if(launcherJar != null)
 			{
-				File jarFile = new File(platform.fileName.replace("file:", "").trim());
-				jarPath = jarFile.getCanonicalPath();
+				command.add("-jar");
+				command.add(launcherJar);
+			}
+			else
+			{
+				/* Not running from a jar of its own, so the main class has to be given by hand */
+				command.add("-cp");
+				command.add(classPath);
+				command.add(STANDALONE_MAIN_CLASS);
 			}
 
-			if(!MobilePlatform.isLibretro)
-			{
-				String[] commands = new String[] { java, "-jar", "-Dfile.encoding="+textEncoding, classPath, jarPath};
+			/* Reopen whatever app is currently loaded, if there is one */
+			if(jarPath != null) { command.add(jarPath); }
 
-				ProcessBuilder processBuilder = null;
+			log(Mobile.LOG_INFO, Mobile.class.getPackage().getName() + "." + Mobile.class.getSimpleName() + ": " + "Restarting FreeJ2ME with: " + command);
 
-				if(jarPath != null) { processBuilder = new ProcessBuilder(new String[] { java, "-jar", "-Dfile.encoding="+textEncoding, classPath, jarPath}); }
-				else { processBuilder = new ProcessBuilder(new String[] { java, "-jar", "-Dfile.encoding="+textEncoding, classPath}); }
+			final ProcessBuilder processBuilder = new ProcessBuilder(command);
 
-				processBuilder.start();
+			processBuilder.start();
 
-				System.exit(0);
-			}
-			else // Libretro governs loading the process up again and not the jar, so post a request for it to do so
-			{
-				libretroRestartRequested = 1;
-				if(textEncoding.equals("ISO_8859_1"))         { libretroEncodingRequested = 0; }
-				else if(textEncoding.equals("Shift_JIS"))     { libretroEncodingRequested = 1; }
-				else if(textEncoding.equals("EUC_KR"))        { libretroEncodingRequested = 2; }
-				// TODO: Support other encodings
-			}
+			System.exit(0);
 		}
-		catch(Exception e) { log(Mobile.LOG_INFO, Mobile.class.getPackage().getName() + "." + Mobile.class.getSimpleName() + ": " + "Failed to restart FreeJ2ME: " + e.getMessage()); e.printStackTrace(); }
+		catch(Exception e)
+		{
+			log(Mobile.LOG_ERROR, Mobile.class.getPackage().getName() + "." + Mobile.class.getSimpleName() + ": " + "Failed to restart FreeJ2ME: " + e.getMessage());
+			e.printStackTrace();
+		}
 	}
 
-	private static String getMainClassFromJar(String classPath)
+	/*
+	 * Path of the app FreeJ2ME currently has loaded, ready to be handed over to a new
+	 * instance through its command line. Returns null whenever nothing is loaded.
+	 */
+	private static String getCurrentJarPath()
 	{
-        try
-		{
-            URL jarUrl = new URL(classPath);
+		/* getPlatform() can still be null while the platform is booting up, so fall back to the static field */
+		final String fileName = (Mobile.getPlatform() != null) ? Mobile.getPlatform().fileName : MobilePlatform.fileName;
 
-			JarFile jarFile = new JarFile(jarUrl.getFile());
-			Manifest manifest = jarFile.getManifest();
-			Attributes attributes = manifest.getMainAttributes();
-			return attributes.getValue("Main-Class");
-        }
-		catch (Exception e) { return null; } // This normally shouldn't fail
-    }
+		if(fileName == null || fileName.trim().length() == 0) { return null; }
+
+		final String location = fileName.trim();
+
+		/* Only file URIs can be turned back into something the OS understands, anything else (an http link, for instance) is handed over as is */
+		if(!location.toLowerCase().startsWith("file:")) { return location; }
+
+		try { return new File(new URI(location)).getCanonicalPath(); }
+		catch(Exception e)
+		{
+			/* Not a well formed file URI, so fall back to stripping the scheme by hand */
+			return new File(location.substring("file:".length()).trim()).getAbsolutePath();
+		}
+	}
+
+	/*
+	 * FreeJ2ME's own jar, but only when it really was launched from one. Returns null when
+	 * running from loose classes or from a classpath holding more than a single entry, as
+	 * "-jar" cannot be used in either of those cases.
+	 */
+	private static String getLauncherJarPath(String classPath)
+	{
+		if(classPath == null) { return null; }
+
+		final StringTokenizer entries = new StringTokenizer(classPath, System.getProperty("path.separator", ":"));
+
+		if(entries.countTokens() != 1) { return null; }
+
+		final File jar = new File(entries.nextToken().trim());
+
+		if(!jar.isFile() || !jar.getName().toLowerCase().endsWith(".jar")) { return null; }
+
+		return jar.getAbsolutePath();
+	}
+
+	/* Java executable of the VM running FreeJ2ME, so restarts never have to rely on the PATH */
+	public static String getJavaExecutablePath()
+	{
+		final String javaHome = System.getProperty("java.home");
+
+		if(javaHome != null)
+		{
+			final String[] names = (File.separatorChar == '\\')
+				? new String[] {"java.exe", "javaw.exe"}
+				: new String[] {"java"};
+
+			for(int i = 0; i < names.length; i++)
+			{
+				final File candidate = new File(javaHome, "bin" + File.separatorChar + names[i]);
+				if(candidate.isFile()) { return candidate.getAbsolutePath(); }
+			}
+		}
+
+		return "java"; // Leave it up to the OS to find one
+	}
 }

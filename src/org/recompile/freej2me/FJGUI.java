@@ -1516,17 +1516,7 @@ public final class FJGUI
 			String command = a.getActionCommand();
 			if (command.equals("Open"))
 			{
-				File file = selectFile("Open JAR / JAD / KJX / MSD File", new String[]{".jar", ".jad", ".kjx", ".msd"}, "Main File Loading was cancelled");
-				if (file != null)
-				{
-					jarfile = file.toURI().toString();
-					if (!hasLoadedFile()) {
-						loadJarFile(jarfile);
-					} else {
-						Mobile.getPlatform().fileName = jarfile;
-						showRestartDialog();
-					}
-				}
+				openFile(selectFile("Open JAR / JAD / KJX / MSD File", new String[]{".jar", ".jad", ".kjx", ".msd"}, "Main File Loading was cancelled"));
 			}
 			else if (command.equals("OpenSp"))
 			{
@@ -1773,7 +1763,29 @@ public final class FJGUI
 
 	public String getJarPath() { return jarfile; }
 
-	public void setJarPath(String jarpath) { jarfile = jarpath; }
+	/*
+	 * Loads the app file that was either picked from the file menu or dropped onto
+	 * the LCD. Both paths go through here so that they can never drift apart.
+	 */
+	public void openFile(File file)
+	{
+		if(file == null) { return; }
+
+		final String path = file.toURI().toString();
+
+		jarfile = path;
+
+		if(!hasLoadedFile())
+		{
+			loadJarFile(path);
+		}
+		else
+		{
+			/* An app is already running, so the new one can only be loaded by restarting */
+			Mobile.getPlatform().fileName = path;
+			showRestartDialog();
+		}
+	}
 
 	public boolean hasJustLoaded() { return firstLoad; }
 
@@ -1798,11 +1810,14 @@ public final class FJGUI
 				{
 					// Already up, just make sure the user can see it.
 					swingDialogs[3].toFront();
+					swingDialogs[3].requestFocus();
 					return;
 				}
-				swingDialogs[3].setLocationRelativeTo(main);
+				if(main != null) { swingDialogs[3].setLocationRelativeTo(main); }
 				swingDialogs[3].setAlwaysOnTop(true);
 				swingDialogs[3].setVisible(true);
+				swingDialogs[3].toFront();
+				swingDialogs[3].requestFocus();
 			}
 		});
 	}
