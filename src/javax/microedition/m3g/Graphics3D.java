@@ -222,6 +222,14 @@ public class Graphics3D
 	private int currAlphaFactor = 256;
 	private int renderOpCount = 0;
 
+	// Depth-sort for painter mode (Z=OFF): eye-space depth per op and group id.
+	// Only used when depth test is disabled; no depth-buffer hijack.
+	private float[] renderDepthData = new float[64];
+	private boolean[] renderDepthTest = new boolean[64];
+	private int[] renderGroupIds = new int[64];
+	private final Transform depthTr = new Transform();
+	private final float[] depthPt = new float[4];
+
 	public Graphics3D()
 	{
 		/*
@@ -581,7 +589,7 @@ public class Graphics3D
 		if (!(node instanceof Mesh || node instanceof Sprite3D || node instanceof Group)) { throw new IllegalArgumentException("Node is not an instance of any of the following: Sprite3D, Mesh, Group"); }
 
 		renderOpCount = 0;
-		queueNode(node, transform, 256);
+		queueNode(node, transform, 256, 0);
 		flushRenderQueue();
 	}
 
@@ -2051,13 +2059,16 @@ public class Graphics3D
 			renderIntData = new int[newCapacity * 3];
 			renderObjData = new Object[newCapacity * 4];
 			renderAlphaData = new int[newCapacity];
+			renderDepthData = new float[newCapacity];
+			renderDepthTest = new boolean[newCapacity];
+			renderGroupIds = new int[newCapacity];
 		}
 	}
 
 	// What we do when queuing things up for rendering is that we just
 	// store their references in global arrays, and sort their drawing order,
 	// that way, no extra memory is used for this functionality.
-	private void queueNode(Node node, Transform transform, int parentAlpha)
+	private void queueNode(Node node, Transform transform, int parentAlpha, int parentGroupId)
 	{
 		// Node not renderable? Skip it and its children.
 		if (!node.isRenderingEnabled()) { return; }
@@ -2076,7 +2087,7 @@ public class Graphics3D
 				if (mesh.getAppearance(i) != null)
 				{
 					// Queue the submesh for rendering
-					queueRenderOp(vertices, mesh.getIndexBuffer(i), mesh.getAppearance(i), transform, node.getScope(), alphaFactor);
+					queueRenderOp(vertices, mesh.getIndexBuffer(i), mesh.getAppearance(i), transform, node.getScope(), alphaFactor, parentGroupId);
 				}
 			}
 
@@ -2094,7 +2105,7 @@ public class Graphics3D
 					Transform sktr = new Transform();
 					skeleton.getCompositeTransform(sktr);
 					if (transform != null) { sktr.preMultiply(transform); }
-					queueNode(skeleton, sktr, alphaFactor);
+					queueNode(skeleton, sktr, alphaFactor, parentGroupId);
 				}
 			}
 		}
@@ -2105,12 +2116,14 @@ public class Graphics3D
 			if (sprite.getAppearance() != null)
 			{
 				// Queue the Sprite3D for rendering
-				queueRenderOp(sprite, null, sprite.getAppearance(), transform, sprite.getScope(), alphaFactor);
+				queueRenderOp(sprite, null, sprite.getAppearance(), transform, sprite.getScope(), alphaFactor, parentGroupId);
 			}
 		}
 		else if (node instanceof Group)
 		{
-			Node child = ((Group) node).firstChild;
+				// This Group becomes the parent for its direct children (per-Group sort key).
+				int thisGroupId = System.identityHashCode(node);
+				Node child = ((Group) node).firstChild;
 			if (child != null)
 			{
 				do
@@ -2121,7 +2134,7 @@ public class Graphics3D
 						child.getCompositeTransform(nodetr);
 						if (transform != null) { nodetr.preMultiply(transform); }
 
-						queueNode(child, nodetr, alphaFactor);
+						queueNode(child, nodetr, alphaFactor, thisGroupId);
 					}
 					child = child.right;
 				}
@@ -2130,12 +2143,13 @@ public class Graphics3D
 		}
 	}
 
-	private void queueRenderOp(Object geomOrSprite, IndexBuffer triangles, Appearance appearance, Transform transform, int scope, int alphaFactor)
+	private void queueRenderOp(Object geomOrSprite, IndexBuffer triangles, Appearance appearance, Transform transform, int scope, int alphaFactor, int groupId)
 	{
 		checkRenderOpQueueSize(renderOpCount + 1);
 
 		final CompositingMode cm = appearance.getCompositingMode();
 		final boolean blended = (cm != null) && (cm.getBlending() != CompositingMode.REPLACE);
+		final boolean usesDepth = this.depthEnabled && (cm == null || cm.isDepthTestEnabled());
 
 		// Store primitive int data: layer, blended flag, scope
 		final int intIdx = renderOpCount * 3;
@@ -2143,6 +2157,9 @@ public class Graphics3D
 		renderIntData[intIdx + 1] = blended ? 1 : 0;
 		renderIntData[intIdx + 2] = scope;
 		renderAlphaData[renderOpCount] = alphaFactor;
+		renderGroupIds[renderOpCount] = groupId;
+		renderDepthTest[renderOpCount] = usesDepth;
+		renderDepthData[renderOpCount] = computeEyeDepth(geomOrSprite, transform);
 
 		// Then its object data that's used for rendering:
 		// Order: [VertexBuffer / Sprite3D], [IndexBuffer / null], Appearance, Transform
@@ -2165,6 +2182,58 @@ public class Graphics3D
 
 		renderIndices[renderOpCount] = renderOpCount;
 		renderOpCount++;
+	}
+
+	
+	private float computeEyeDepth(Object geomOrSprite, Transform transform)
+	{
+		try
+		{
+			if (geomOrSprite instanceof VertexBuffer)
+			{
+				VertexBuffer vb = (VertexBuffer) geomOrSprite;
+				float[] sb = new float[4];
+				VertexArray va = vb.getPositions(sb);
+				if (va == null) return 0f;
+				int n = va.getVertexCount();
+				if (n == 0) return 0f;
+				// Build eye matrix: camInv * model
+				depthTr.set(currCamTransInv);
+				if (transform != null) depthTr.postMultiply(transform);
+				depthTr.postTranslate(sb[1], sb[2], sb[3]);
+				depthTr.postScale(sb[0], sb[0], sb[0]);
+				float[] out = new float[n * 4];
+				depthTr.transform(va, out, true);
+				float sum = 0f;
+				int cnt = 0;
+				for (int i = 0; i < n; i++)
+				{
+					float z = out[i * 4 + 2];
+					float w = out[i * 4 + 3];
+					if (w != 0f) z /= w;
+					// eye Z is negative in front of camera; depth = -z
+					float d = -z;
+					// Discard vertices behind camera (d negative) for average? Keep but they push average closer.
+					// Use only vertices in front to avoid behind-camera skew.
+					if (d > 0f) { sum += d; cnt++; }
+				}
+				if (cnt == 0) return 0f;
+				return sum / (float) cnt;
+			}
+			else if (geomOrSprite instanceof Sprite3D)
+			{
+				// Sprite: transform origin to eye space
+				depthTr.set(currCamTransInv);
+				if (transform != null) depthTr.postMultiply(transform);
+				depthPt[0] = 0f; depthPt[1] = 0f; depthPt[2] = 0f; depthPt[3] = 1f;
+				depthTr.transform(depthPt);
+				float w = depthPt[3];
+				float z = (w != 0f) ? depthPt[2] / w : depthPt[2];
+				return -z;
+			}
+		}
+		catch (Exception e) { }
+		return 0f;
 	}
 
 	// Insertion sort here just like in Triangle.java: Minimal space complexity,
@@ -2197,6 +2266,31 @@ public class Graphics3D
 				{
 					renderIndices[j + 1] = renderIndices[j];
 					j--;
+				}
+				else if (curSortValue == keySortValue)
+				{
+					int keyGroup = renderGroupIds[keyIndex];
+					int curGroup = renderGroupIds[curIndex];
+					if (curGroup == keyGroup)
+					{
+						boolean curDepthOn = renderDepthTest[curIndex];
+						boolean keyDepthOn = renderDepthTest[keyIndex];
+						// Sort only when at least one relies on painter (depth disabled).
+						// Respect game's CompositingMode depth flags - no depth-buffer hijack.
+						if (!curDepthOn || !keyDepthOn)
+						{
+							float curDepth = renderDepthData[curIndex];
+							float keyDepth = renderDepthData[keyIndex];
+							// Painter: farther (larger depth = -eyeZ) first.
+							if (curDepth < keyDepth - 1e-4f)
+							{
+								renderIndices[j + 1] = renderIndices[j];
+								j--;
+								continue;
+							}
+						}
+					}
+					break;
 				}
 				else { break; }
 			}
