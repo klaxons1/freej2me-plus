@@ -225,6 +225,7 @@ public class Graphics3D
 	// Depth-sort for painter mode (Z=OFF): eye-space depth per op and group id.
 	// Only used when depth test is disabled; no depth-buffer hijack.
 	private float[] renderDepthData = new float[64];
+	private float[] renderYData = new float[64];
 	private boolean[] renderDepthTest = new boolean[64];
 	private int[] renderGroupIds = new int[64];
 	private final Transform depthTr = new Transform();
@@ -255,6 +256,7 @@ public class Graphics3D
 
 	public int addLight(Light light, Transform transform)
 	{
+		if (this.target != null && this.renderOpCount > 0) { flushRenderQueue(); }
 		/* As per JSR-184, addLight() must throw a NullPointerException if no light is given */
 		if (light == null) { throw new NullPointerException("addLight() was called but no light object was provided."); }
 
@@ -374,6 +376,7 @@ public class Graphics3D
 		Arrays.fill(this.depthBuffer, DEPTH_CLEAR_VALUE);
 		this.depthEnabled = depthBuffer;
 		this.hints = hints;
+		this.renderOpCount = 0;
 	}
 
 	public void clear(Background background)
@@ -389,6 +392,8 @@ public class Graphics3D
 			Mobile.log(Mobile.LOG_WARNING, Graphics3D.class.getPackage().getName() + "." + Graphics3D.class.getSimpleName() + ": " + "clear() called without a render target, ignoring.");
 			return;
 		}
+		// Flush any pending batched ops before clearing (separate passes).
+		if (this.renderOpCount > 0) { flushRenderQueue(); }
 
 		final int color = (background != null) ? background.getColor() : 0x00000000;
 		final boolean clearColor = (background == null) || background.isColorClearEnabled();
@@ -530,6 +535,13 @@ public class Graphics3D
 
 	public void releaseTarget()
 	{
+		/* Flush any batched retained-mode ops before releasing - this allows
+		 * sorting across multiple render(Node) calls in one frame (KO Racing
+		 * renders each track piece as a separate Mesh). */
+		if(this.target != null && this.renderOpCount > 0)
+		{
+			flushRenderQueue();
+		}
 		/* Ignore the call if no render target is bound. */
 		if(this.target != null)
 		{
@@ -568,6 +580,7 @@ public class Graphics3D
 		positionLights(world, world);
 
 		render((Group) world, null);
+		if (this.renderOpCount > 0) { flushRenderQueue(); }
 	}
 
 	public void render(Node node, Transform transform)
@@ -588,9 +601,7 @@ public class Graphics3D
 		/* Also per JSR-184, throw IllegalStateException if if node is not a Sprite3D, Mesh, or Group Object. */
 		if (!(node instanceof Mesh || node instanceof Sprite3D || node instanceof Group)) { throw new IllegalArgumentException("Node is not an instance of any of the following: Sprite3D, Mesh, Group"); }
 
-		renderOpCount = 0;
 		queueNode(node, transform, 256, 0);
-		flushRenderQueue();
 	}
 
 	public void render(VertexBuffer vertices, IndexBuffer triangles, Appearance appearance, Transform transform)
@@ -601,6 +612,7 @@ public class Graphics3D
 
 	private void renderSubmesh(VertexBuffer vertices, IndexBuffer triangles, Appearance appearance, Transform transform, int scope, int alphaFactor)
 	{
+		if (this.renderOpCount > 0) { flushRenderQueue(); }
 		this.currAlphaFactor = alphaFactor;
 
 		/* As per JSR-184, if vertices, triangles or appearence are null, throw a NullPointerException. */
@@ -1221,12 +1233,14 @@ public class Graphics3D
 
 	public void resetLights()
 	{
+		if (this.target != null && this.renderOpCount > 0) { flushRenderQueue(); }
 		this.currLights.clear();
 		this.currLightTrans.clear();
 	}
 
 	public void setCamera(Camera camera, Transform transform)
 	{
+		if (this.target != null && this.renderOpCount > 0) { flushRenderQueue(); }
 		this.currCam = camera;
 
 		/* If no transform is given, the identity matrix is used as per JSR-184. */
@@ -1256,6 +1270,7 @@ public class Graphics3D
 
 	public void setLight(int index, Light light, Transform transform)
 	{
+		if (this.target != null && this.renderOpCount > 0) { flushRenderQueue(); }
 		/* As per JSR-184, throw IndexOutOfBoundsException if index < 0 or index > CurrentAmountOfLights. */
 		if (index < 0 || index >= MAX_LIGHTS) { throw new IndexOutOfBoundsException("Tried to modify a Light on an out-of-bounds index."); }
 
@@ -2060,6 +2075,7 @@ public class Graphics3D
 			renderObjData = new Object[newCapacity * 4];
 			renderAlphaData = new int[newCapacity];
 			renderDepthData = new float[newCapacity];
+			renderYData = new float[newCapacity];
 			renderDepthTest = new boolean[newCapacity];
 			renderGroupIds = new int[newCapacity];
 		}
@@ -2160,6 +2176,8 @@ public class Graphics3D
 		renderGroupIds[renderOpCount] = groupId;
 		renderDepthTest[renderOpCount] = usesDepth;
 		renderDepthData[renderOpCount] = computeEyeDepth(geomOrSprite, transform);
+		// also capture average eye Y for heuristic grouping (ground vs mountains)
+		renderYData[renderOpCount] = computeEyeY(geomOrSprite, transform);
 
 		// Then its object data that's used for rendering:
 		// Order: [VertexBuffer / Sprite3D], [IndexBuffer / null], Appearance, Transform
@@ -2185,6 +2203,40 @@ public class Graphics3D
 	}
 
 	
+	private float computeEyeY(Object geomOrSprite, Transform transform)
+	{
+		try
+		{
+			if (geomOrSprite instanceof VertexBuffer)
+			{
+				VertexBuffer vb = (VertexBuffer) geomOrSprite;
+				float[] sb = new float[4];
+				VertexArray va = vb.getPositions(sb);
+				if (va == null) return 0f;
+				int n = va.getVertexCount();
+				if (n == 0) return 0f;
+				depthTr.set(currCamTransInv);
+				if (transform != null) depthTr.postMultiply(transform);
+				depthTr.postTranslate(sb[1], sb[2], sb[3]);
+				depthTr.postScale(sb[0], sb[0], sb[0]);
+				float[] out = new float[n * 4];
+				depthTr.transform(va, out, true);
+				float sum = 0f; int cnt=0;
+				for (int i=0;i<n;i++) { float y=out[i*4+1]; float w=out[i*4+3]; if(w!=0f) y/=w; if (-out[i*4+2]/ (w!=0f?w:1f) > 0f) { sum+=y; cnt++; } }
+				if(cnt==0) return 0f; return sum/(float)cnt;
+			}
+			else if (geomOrSprite instanceof Sprite3D)
+			{
+				depthTr.set(currCamTransInv);
+				if (transform != null) depthTr.postMultiply(transform);
+				depthPt[0]=0f; depthPt[1]=0f; depthPt[2]=0f; depthPt[3]=1f;
+				depthTr.transform(depthPt);
+				float w=depthPt[3]; float y=(w!=0f)?depthPt[1]/w:depthPt[1]; return y;
+			}
+		} catch (Exception e) {}
+		return 0f;
+	}
+
 	private float computeEyeDepth(Object geomOrSprite, Transform transform)
 	{
 		try
@@ -2279,6 +2331,12 @@ public class Graphics3D
 						// Respect game's CompositingMode depth flags - no depth-buffer hijack.
 						if (!curDepthOn || !keyDepthOn)
 						{
+							// Heuristic: don't reorder objects that are vertically
+							// far apart (ground vs mountains). Mountains should stay
+							// as a background block before the track, not interleaved.
+							float curY = renderYData[curIndex];
+							float keyY = renderYData[keyIndex];
+							if (Math.abs(curY - keyY) > 3.0f) { break; }
 							float curDepth = renderDepthData[curIndex];
 							float keyDepth = renderDepthData[keyIndex];
 							// Painter: farther (larger depth = -eyeZ) first.
