@@ -23,6 +23,11 @@ class Triangle
 	// 1.0f / 255.0f, to prevent a bunch of divisions in lighting calculations
 	private static final float INVDIV = 0.003921569f;
 
+	private static final float NEAR_EPS = 0.001f;
+	private static final int PLANE_NEAR = 0;
+	private static final int PLANE_EYE = 1;
+	private static final int MAX_CLIPPED_VERTS = 8;
+
 	// Temporary buffer for normals and lighting calculations
 	private static final float[] N_EYE = new float[4];
 	private static final float[] V_EYE = new float[4];
@@ -30,11 +35,14 @@ class Triangle
 
 	// Temporary buffer for input and output vertices/texCoords/vertex colors.
 	private static final int[] inC = new int[3];
-	private static final int[] outC = new int[4];
+	private static final int[] clipC1 = new int[MAX_CLIPPED_VERTS];
+	private static final int[] outC = new int[MAX_CLIPPED_VERTS];
 	private static final float[] inV = new float[12];
 	private static final float[][] inT = new float[Graphics3D.NUM_TEXTURE_UNITS][12];
-	private static final float[] outV = new float[16];
-	private static final float[][] outT = new float[Graphics3D.NUM_TEXTURE_UNITS][16];
+	private static final float[] clipV1 = new float[MAX_CLIPPED_VERTS * 4];
+	private static final float[][] clipT1 = new float[Graphics3D.NUM_TEXTURE_UNITS][MAX_CLIPPED_VERTS * 4];
+	private static final float[] outV = new float[MAX_CLIPPED_VERTS * 4];
+	private static final float[][] outT = new float[Graphics3D.NUM_TEXTURE_UNITS][MAX_CLIPPED_VERTS * 4];
 
 	// Temporary variables for lighting calculations.
 	private static int matAmbient, matDiffuse, matSpecular, matEmissive, lightAlpha;
@@ -100,19 +108,19 @@ class Triangle
 		boolean hasColors = hasLighting || (colorArray != null);
 
 		// Only allocate a new triangle array if it doesn't exist, or cannot fit the incoming mesh.
-		// Near-plane clipping can split a crossing triangle into two, hence the `* 2`, as
-		// the worst case here is a single triangle that takes the whole screen and is clipped to 2.
-		if(Triangle.result == null || totalTris * 2 > Triangle.result.length)
+		// Near-plane and eye-plane clipping can split a triangle into up to 3 triangles.
+		if(Triangle.result == null || totalTris * 4 > Triangle.result.length)
 		{
 			// Let's start off by copying the references of the old array to the
 			// new one. Saves having to reallocate all objects again whenever
 			// the size increases, as we can just reuse the same references.
 			final int oldLen = (Triangle.result == null) ? 0 : Triangle.result.length;
+			final int newCap = Math.max(64, totalTris * 4);
 
-			Triangle[] newRef = new Triangle[totalTris * 2];
+			Triangle[] newRef = new Triangle[newCap];
 			if (oldLen > 0) { System.arraycopy(Triangle.result, 0, newRef, 0, oldLen); }
 
-			for (int i = oldLen; i < totalTris * 2; i++) {newRef[i] = new Triangle(); }
+			for (int i = oldLen; i < newCap; i++) { newRef[i] = new Triangle(); }
 			Triangle.result = newRef;
 		}
 
@@ -158,22 +166,31 @@ class Triangle
 			final int idx1 = i1 << 2;
 			final int idx2 = i2 << 2;
 
-			// Cull as early as possible, so we save the need to even do copies.
-			// in those cases.
 			final float ax = vert[idx0], ay = vert[idx0 + 1], aw = vert[idx0 + 3];
 			final float bx = vert[idx1], by = vert[idx1 + 1], bw = vert[idx1 + 3];
 			final float cx = vert[idx2], cy = vert[idx2 + 1], cw = vert[idx2 + 3];
 
-			final boolean ccw = ((ax * by - ay * bx) * cw +
-				(bx * cy - by * cx) * aw + (cx * ay - cy * ax) * bw) > 0.0f;
+			// If all three vertices are behind the eye plane or near plane, discard immediately.
+			if (aw <= NEAR_EPS && bw <= NEAR_EPS && cw <= NEAR_EPS) { continue; }
+			if (vert[idx0 + 2] + aw < 0.0f && vert[idx1 + 2] + bw < 0.0f && vert[idx2 + 2] + cw < 0.0f) { continue; }
 
-			// XOR: When even a ternary is considered "too much overhead".
-			final boolean isFrontFace = polygonClockwise ^ ccw;
+			// Winding order and frustum checks are only mathematically valid when all
+			// vertices are in front of the camera (all w > 0). When any vertex has w <= NEAR_EPS,
+			// the homogeneous determinant sign can invert (flipping front/back faces), so we defer
+			// culling until after clipping against the eye plane.
+			final boolean allInFrontOfEye = (aw > NEAR_EPS && bw > NEAR_EPS && cw > NEAR_EPS);
+			boolean isFrontFace = true;
 
-			final boolean cullTriangle = (cullingMode == PolygonMode.CULL_BACK && !isFrontFace) ||
-				(cullingMode == PolygonMode.CULL_FRONT && isFrontFace);
+			if (allInFrontOfEye)
+			{
+				final boolean ccw = isCounterClockwise(vert, idx0, idx1, idx2);
+				isFrontFace = polygonClockwise ^ ccw;
 
-			if (cullTriangle || outsideFrustum(vert, idx0, idx1, idx2)) { continue; }
+				final boolean cullTriangle = (cullingMode == PolygonMode.CULL_BACK && !isFrontFace) ||
+					(cullingMode == PolygonMode.CULL_FRONT && isFrontFace);
+
+				if (cullTriangle || outsideFrustum(vert, idx0, idx1, idx2)) { continue; }
+			}
 
 			Triangle.inV[0] = vert[idx0];     Triangle.inV[1] = vert[idx0 + 1];
 			Triangle.inV[2] = vert[idx0 + 2]; Triangle.inV[3] = vert[idx0 + 3];
@@ -244,38 +261,84 @@ class Triangle
 			}
 
 			/*
-			 * Clip against the homogeneous near plane (z >= -w), interpolating
-			 * positions, texture coordinates and vertex colors before perspective division.
-			 *
-			 * First though, check if we even need to clip it at all, and save
-			 * a method call and a few copy operations if we don't.
+			 * Clip against the homogeneous near plane (z >= -w) and the camera eye plane
+			 * (w >= NEAR_EPS), interpolating positions, texture coordinates and vertex colors
+			 * before perspective division. Clipping against both planes is required when
+			 * oblique near clipping planes (e.g. portals) are used, as points behind the
+			 * camera eye plane can otherwise satisfy z_clip + w >= 0.
 			 */
+			final boolean needsNearClip = (Triangle.inV[2] < -Triangle.inV[3]) ||
+				(Triangle.inV[6] < -Triangle.inV[7])  ||
+				(Triangle.inV[10] < -Triangle.inV[11]);
+
+			final boolean needsEyeClip = (Triangle.inV[3] < NEAR_EPS) ||
+				(Triangle.inV[7] < NEAR_EPS)  ||
+				(Triangle.inV[11] < NEAR_EPS);
+
 			final int outCount;
 			final float[] srcV;
 			final float[][] srcT;
 			final int[] srcC;
 
-			final boolean needsNearClip = (Triangle.inV[2] < -Triangle.inV[3]) ||
-				(Triangle.inV[6] < -Triangle.inV[7])  ||
-				(Triangle.inV[10] < -Triangle.inV[11]);
-
-			if (!needsNearClip)
+			if (!needsNearClip && !needsEyeClip)
 			{
 				outCount = 3;
 				srcV = Triangle.inV;
 				srcT = Triangle.inT;
 				srcC = Triangle.inC;
 			}
-			else
+			else if (needsNearClip && !needsEyeClip)
 			{
-				outCount = clipNearPlane(Triangle.inV, Triangle.inT, Triangle.inC,
-						hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC);
+				outCount = clipPlane(3, Triangle.inV, Triangle.inT, Triangle.inC,
+						hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC, PLANE_NEAR);
 
 				if (outCount < 3) { continue; }
 
 				srcV = Triangle.outV;
 				srcT = Triangle.outT;
 				srcC = Triangle.outC;
+			}
+			else if (!needsNearClip && needsEyeClip)
+			{
+				outCount = clipPlane(3, Triangle.inV, Triangle.inT, Triangle.inC,
+						hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC, PLANE_EYE);
+
+				if (outCount < 3) { continue; }
+
+				srcV = Triangle.outV;
+				srcT = Triangle.outT;
+				srcC = Triangle.outC;
+			}
+			else
+			{
+				// Needs both near-plane and eye-plane clipping
+				int count1 = clipPlane(3, Triangle.inV, Triangle.inT, Triangle.inC,
+						hasTex, texc, Triangle.clipV1, Triangle.clipT1, Triangle.clipC1, PLANE_NEAR);
+
+				if (count1 < 3) { continue; }
+
+				outCount = clipPlane(count1, Triangle.clipV1, Triangle.clipT1, Triangle.clipC1,
+						hasTex, texc, Triangle.outV, Triangle.outT, Triangle.outC, PLANE_EYE);
+
+				if (outCount < 3) { continue; }
+
+				srcV = Triangle.outV;
+				srcT = Triangle.outT;
+				srcC = Triangle.outC;
+			}
+
+			// If the triangle crossed the eye plane, early culling was bypassed;
+			// check culling now on the valid clipped polygon in front of the camera.
+			if (!allInFrontOfEye && cullingMode != PolygonMode.CULL_NONE)
+			{
+				final boolean clippedCcw = isCounterClockwise(srcV, 0, 4, 8);
+				final boolean clippedFrontFace = polygonClockwise ^ clippedCcw;
+
+				if ((cullingMode == PolygonMode.CULL_BACK && !clippedFrontFace) ||
+					(cullingMode == PolygonMode.CULL_FRONT && clippedFrontFace))
+				{
+					continue;
+				}
 			}
 
 			// AA is enabled? Check for shared edge boundaries
@@ -302,9 +365,19 @@ class Triangle
 			prevI1 = i1;
 			prevI2 = i2;
 
-			/* Triangulate the resulting polygon (3 or 4 vertices) as a fan. */
+			/* Triangulate the resulting polygon (3 to 5 vertices) as a fan. */
 			for (int fan = 0; fan + 2 < outCount; fan++)
 			{
+				if (renderableTriangles[0] >= Triangle.result.length)
+				{
+					final int oldLen = Triangle.result.length;
+					final int newCap = oldLen * 2;
+					Triangle[] newRef = new Triangle[newCap];
+					System.arraycopy(Triangle.result, 0, newRef, 0, oldLen);
+					for (int i = oldLen; i < newCap; i++) { newRef[i] = new Triangle(); }
+					Triangle.result = newRef;
+				}
+
 				final Triangle tri = Triangle.result[renderableTriangles[0]];
 
 				if(hasAA)
@@ -317,11 +390,11 @@ class Triangle
 					}
 					else
 					{
-						// Near-plane clipped fans should retain the real outer
-						// boundaries and completely ignore internal clip split.
+						// Clipped fans should retain the real outer boundaries
+						// and completely ignore internal clip splits.
 						tri.edgeABBoundary = (fan == 0) ? tEdgeABBoundary : false;
-						tri.edgeBCBoundary = (fan == 0) ? false : tEdgeBCBoundary;
-						tri.edgeCABoundary = (fan == 0) ? false : tEdgeCABoundary;
+						tri.edgeBCBoundary = (fan == 0) ? tEdgeBCBoundary : false;
+						tri.edgeCABoundary = (fan + 3 == outCount) ? tEdgeCABoundary : false;
 					}
 				}
 
@@ -660,24 +733,23 @@ class Triangle
 	}
 
 	/*
-	 * Sutherland-Hodgman clip of one triangle against the homogeneous near plane
-	 * z + w >= 0. This is valid for perspective, parallel and generic projection
-	 * matrices; camera-space distances are not available for a generic matrix.
-	 * Writes the resulting polygon (0, 3 or 4 vertices) into outV/outT and returns
-	 * its vertex count. Positions, texture coordinates and vertex colors
-	 * interpolate linearly in clip space, which is exact for all.
+	 * Sutherland-Hodgman clip of one convex polygon against either the
+	 * homogeneous near plane (z + w >= 0) or the camera eye plane (w >= NEAR_EPS).
+	 * Writes the resulting polygon into outV/outT/outC and returns its vertex count.
+	 * Positions, texture coordinates and vertex colors interpolate linearly in clip space,
+	 * which is exact for all attributes.
 	 */
-	private static final int clipNearPlane(float[] inV, float[][] inT, int[] inC,
-		boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC)
+	private static final int clipPlane(int inCount, float[] inV, float[][] inT, int[] inC,
+		boolean hasTex, float[][] texc, float[] outV, float[][] outT, int[] outC, int planeType)
 	{
 		int outCount = 0;
 
-		for (int i = 0; i < 3; i++)
+		for (int i = 0; i < inCount; i++)
 		{
-			final int j = (i + 1) & ((i - 2) >> 31); // j = (i + 1) % 3
-			final float wi = inV[4*i+3], wj = inV[4*j+3];
-			final float distanceI = inV[4*i+2] + wi;
-			final float distanceJ = inV[4*j+2] + wj;
+			final int j = (i + 1 == inCount) ? 0 : (i + 1);
+			final float wi = inV[4*i + 3], wj = inV[4*j + 3];
+			final float distanceI = (planeType == PLANE_NEAR) ? (inV[4*i + 2] + wi) : (wi - NEAR_EPS);
+			final float distanceJ = (planeType == PLANE_NEAR) ? (inV[4*j + 2] + wj) : (wj - NEAR_EPS);
 			final boolean insideI = distanceI >= 0.0f, insideJ = distanceJ >= 0.0f;
 
 			if (insideI)
@@ -696,7 +768,10 @@ class Triangle
 			}
 			if (insideI != insideJ)
 			{
-				final float amt = distanceI / (distanceI - distanceJ);
+				float amt = distanceI / (distanceI - distanceJ);
+				if (amt < 0.0f) { amt = 0.0f; }
+				else if (amt > 1.0f) { amt = 1.0f; }
+
 				for (int c = 0; c < 4; c++)
 				{
 					outV[4*outCount + c] = inV[4*i + c] + amt * (inV[4*j + c] - inV[4*i + c]);
@@ -710,6 +785,11 @@ class Triangle
 							}
 						}
 					}
+				}
+
+				if (planeType == PLANE_EYE)
+				{
+					outV[4*outCount + 3] = NEAR_EPS;
 				}
 
 				final int cA = inC[i], cB = inC[j];
